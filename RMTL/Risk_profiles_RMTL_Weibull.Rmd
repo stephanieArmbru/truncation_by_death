@@ -1,0 +1,427 @@
+
+---
+title: "Semi-Competing Risk profiles - Restricted Mean Time Lost for Weibull baseline hazard"
+output: html_document
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+# {.tabset .tabset-fade .tabset-pills} 
+
+## Setup
+
+```{r, echo=T,message=F,warning=F,results='hide'}
+library(tidyverse)
+library(knitr)
+library(ggpubr)
+
+library(survival)
+
+library(SemiCompRisks)
+library(SemiCompRisksFreq)
+library(splines2)
+
+
+# use Harrison's color coding 
+#color blind friendly colors from here: https://davidmathlogic.com/colorblind/#%23648FFF-%23785EF0-%23DC267F-%23FE6100-%23FFB000
+cb_blue <- "#648FFF"; cb_red <- "#DC267F"; cb_purple <- "#785EF0"; cb_orange <- "#FE6100"; cb_grey <- "#CACACA"
+
+#pink and green color-blind friendly color palette, with two colors (pink and green)
+#each in two shades: light and dark
+four_color_paired <- RColorBrewer::brewer.pal(n=4,name="PiYG")[c(3,4,2,1)]
+
+
+#other colors used in plots
+two_color_cb <- c(cb_blue,cb_red)
+
+three_color <- c("dodgerblue","firebrick3","purple3")
+three_color_cb <- c(cb_blue,cb_red,cb_purple)
+
+#take three cb colors and reduce V from 100 to 60
+three_color_cb_dark <- c("#3b5699", "#751342", "#453589")
+
+
+four_color <- c("lightgray","firebrick3","purple3","dodgerblue")
+four_color_cb <- c(cb_grey,cb_red,cb_purple,cb_blue)
+four_color_forest <- c("dodgerblue","firebrick3","purple3","magenta")
+four_color_forest_cb <- c(cb_blue,cb_red,cb_purple,cb_orange)
+five_color <- c("lightgray","firebrick3","magenta","purple3","dodgerblue")
+five_color_cb <- c(cb_grey,cb_red,cb_orange,cb_purple,cb_blue)
+
+four_color_grey <- c("grey80","grey60","grey40","grey20")
+five_color_grey <- c("grey80","grey60","grey40","grey20","black")
+
+# RColorBrewer::display.brewer.all(n=4,colorblindFriendly = TRUE)
+# color-blind friendly categorical colors
+three_color_qual <- RColorBrewer::brewer.pal(n=3,name="Set2")
+four_color_qual <- RColorBrewer::brewer.pal(n=4,name="Dark2")
+five_color_qual <- RColorBrewer::brewer.pal(n=5,name="Dark2")
+
+```
+
+## Functions 
+```{r, echo=T,message=F,warning=F,results='hide'}
+h3tv_knots_temp <- c(3, 8, 15.5)
+# define basis function for piecewise effect of non-terminal time on terminal time 
+h3_b_fun <- function(x) splines2::bSpline(x,
+                                          knots = h3tv_knots_temp,
+                                          Boundary.knots = c(0,Inf),
+                                          degree = 0,intercept = FALSE)
+# function to plot risk profile 
+plot_risk_profile <- function(tseq_pred,
+                              ValPred, 
+                              i, 
+                              colors = four_color_cb) {
+  length_tseq <- length(tseq_pred)
+  
+  # format data frame 
+  plot_frame <- data.frame(
+    Time = rep(tseq_pred, 4),
+    Probability = c(ValPred$p_neither[, i], 
+                    ValPred$p_term_only[, i],
+                    ValPred$p_both[, i],
+                    ValPred$p_nonterm_only[, i]),
+    Outcome=factor(x = c(rep("Neither",length_tseq),
+                         rep("Terminal Only",length_tseq),
+                         rep("Both",length_tseq),
+                         rep("Nonterminal Only",length_tseq)),
+                   levels = c("Neither",
+                              "Terminal Only",
+                              "Both",
+                              "Nonterminal Only"))
+  )
+  
+    g <- ggplot(plot_frame, 
+              aes(x = Time, 
+                  y = Probability)) +
+    geom_area(aes(colour = Outcome, 
+                  fill = Outcome)) +
+    scale_color_manual(values = colors) +
+    scale_fill_manual(values = colors) + 
+    theme_bw() +
+    labs(title = paste0("Patient ", i, collapse = ""))
+    
+    if(valDat[i, ]$event1 == 1) {
+    trueT1 <- valDat[i, ]$time1
+    
+    g <- g +
+      geom_vline(aes(xintercept = trueT1), 
+                 linetype = "dashed", 
+                 color = "red")
+    
+  }
+  if(valDat[i, ]$event2 == 1) {
+    trueT2 <- valDat[i, ]$time2
+    
+     g <- g +
+      geom_vline(aes(xintercept = trueT2), 
+                 linetype = "dashed", 
+                 color = "black")
+  }
+
+    return(g)
+}
+```
+
+## Load Data 
+```{r, echo=T,message=F,warning=F,results='show'}
+# load data file 
+load(file = "Data/SimData_Training.RData")
+load(file = "Data/SimData_Validation.RData")
+
+
+load(file = "Data/TrueParameter_List.RData")
+
+# extract true parameters
+x_sim <- paramList$x1
+
+beta1_true <- paramList$beta1.true
+beta2_true <- paramList$beta2.true
+beta3_true <- paramList$beta3.true
+
+alpha1_true <- paramList$alpha1.true
+alpha2_true <- paramList$alpha2.true
+alpha3_true <- paramList$alpha3.true
+
+
+kappa1_true <- paramList$kappa1.true
+kappa2_true <- paramList$kappa2.true
+kappa3_true <- paramList$kappa3.true
+
+h3tv_degree <- paramList$h3tv_degree 
+h3tv_knots <- paramList$h3tv_knots
+beta3tv_true <- paramList$beta3tv.true
+
+
+theta_true <- paramList$theta
+
+```
+
+
+## Shared frailty Illness-Death model with Weibull baseline hazard 
+
+```{r, echo=T,message=F,warning=F,results='show'}
+# define formula 
+form_temp_no_t1cat <- Formula::Formula(time1 + event1 | time2 + event2 ~ x1 + x2 + x3 | x1 + x2 + x3 | x1 + x2 + x3 )
+
+SFID_no_t1cat <- SemiCompRisksFreq::FreqID_HReg2(Formula = form_temp_no_t1cat, 
+                                                 data = trainDat,
+                                                 hazard = "wb", 
+                                                 model = "semi-Markov",
+                                                 # number of baseline parameters 
+                                                 nP0 = c(2,2,2),
+                                                 frailty = TRUE, 
+                                                 optim_method = "BFGS",
+                                                 extra_starts = 0)
+
+SFID_no_t1cat %>% summary()
+
+```
+
+### Visualize fitted shared frailty Illness-Death model 
+We are restricting ourselves to a time window 0 to 100. 
+Since no censoring was modeled, the terminal event time for some patients might be very high. 
+
+```{r, echo=T,message=F,warning=F,results='show'}
+# estimate for a certain time window 
+tseq_pred <- seq(0, 100)
+
+SFID_no_t1cat_pred <- predict(SFID_no_t1cat, 
+                              tseq = tseq_pred)
+
+plot(SFID_no_t1cat_pred, plot.est = "Haz")
+plot(SFID_no_t1cat_pred, plot.est = "CumHaz")
+plot(SFID_no_t1cat_pred, plot.est = "Surv")
+
+```
+
+
+### Forest plot for model coefficients 
+The covariate coefficients for the marginal and conditional hazard functions are estimated with high accuracy. 
+
+```{r, eval=T,echo=T}
+SFID_coef <- summary(SFID_no_t1cat)$coef_long %>% 
+  as.data.frame() %>% 
+  mutate(name = c("beta1.1", "beta1.2", "beta1.3", 
+                  "beta2.1", "beta2.2", "beta2.3", 
+                  "beta3.1", "beta3.2", "beta3.3"), 
+         haz = c(rep("non-terminal", 3), 
+                 rep("terminal", 3), 
+                 rep("terminal | non-terminal", 3)))
+
+SFID_coef_true <- data.frame(name = c("beta1.1", "beta1.2", "beta1.3", 
+                                      "beta2.1", "beta2.2", "beta2.3", 
+                                      "beta3.1", "beta3.2", "beta3.3"), 
+                             true_coef = c(beta1_true, beta2_true, beta3_true), 
+                             haz = c(rep("non-terminal", 3), 
+                                     rep("terminal", 3), 
+                                     rep("terminal | non-terminal", 3)))
+
+ggplot(data = SFID_coef, 
+       aes(x = name, 
+           y = beta, 
+           color = haz %>% as.factor())) +
+  geom_point() +
+  geom_point(data = SFID_coef_true, 
+             aes(x = name, 
+                 y = true_coef, 
+                 color = haz %>% as.factor(), 
+                 shape = "True coef."),
+             size = 4) +
+  geom_errorbar(aes(ymin = beta - 1.96 * SE, 
+                    ymax = beta + 1.96 * SE)) +
+  coord_flip() +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(y = "Coefficients", 
+       x = "", 
+       color = "", 
+       shape = "") +
+  scale_shape_manual(values = c("True coef." = 8))
+```
+### Forest plot for Baseline hazard coefficients
+
+
+```{r}
+# theta frailty parameter 
+# kappa / alpha WB baseline hazard parameter
+
+bs_haz_coef <- summary(SFID_no_t1cat)$h0_long %>% 
+  exp() %>% # reported on a log scale; monotone increasing so transformation of CI possible; alternatively delta method 
+  as.data.frame() %>% 
+  mutate(name = c("kappa1", "alpha1", 
+                  "kappa2", "alpha2", 
+                  "kappa12", "alpha12"), 
+         haz = c(rep("non-terminal", 2), 
+                 rep("terminal", 2), 
+                 rep("terminal | non-terminal", 2)))
+
+theta_coef <- summary(SFID_no_t1cat)$theta %>% t() %>%  
+  as.data.frame() %>% 
+  dplyr::select(theta, SE, LL, UL) %>% 
+  mutate(name = "theta", 
+         haz = "frailty") %>% 
+    rename(beta = theta)
+
+bs_haz_coef <- rbind(bs_haz_coef, 
+                     theta_coef)
+
+bs_haz_coef_true <- data.frame(name = c("kappa1", "alpha1", 
+                                        "kappa2", "alpha2", 
+                                        "kappa12", "alpha12", 
+                                        "theta"), 
+                               beta = c(kappa1_true, alpha1_true, 
+                                        kappa2_true, alpha2_true, 
+                                        kappa3_true, alpha3_true, 
+                                        theta_true), 
+         haz = c(rep("non-terminal", 2), 
+                 rep("terminal", 2), 
+                 rep("terminal | non-terminal", 2), 
+                 "frailty"))
+
+
+ggplot(data = bs_haz_coef, 
+       aes(x = name, 
+           y = beta, 
+           color = haz %>% as.factor())) +
+  geom_point() +
+  geom_point(data = bs_haz_coef_true, 
+             aes(x = name, 
+                 y = beta, 
+                 color = haz %>% as.factor(), 
+                 shape = "True coef."),
+             size = 4) +
+  geom_errorbar(aes(ymin = beta - 1.96 * SE, 
+                    ymax = beta + 1.96 * SE)) +
+  coord_flip() +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(y = "Coefficients", 
+       x = "", 
+       color = "", 
+       shape = "") +
+  scale_shape_manual(values = c("True coef." = 8))
+```
+
+
+### Baseline hazard function 
+The baseline hazard is fit assuming a Weibull form, which aligns with the true form of the baseline hazard function underlying the simulation. 
+
+We need to be careful regarding the different parametrizations of the Weibull distribution in the stats package and the SemiCompRiskFreq package. 
+
+
+The standard R parametrization is
+\begin{align}
+f(x) & = \frac{\alpha}{\sigma} \left( \frac{x}{\sigma} \right)^{\alpha - 1} \exp\left( - \frac{x}{\sigma}^{\alpha} \right)
+\end{align}
+
+The parametrization in the SemiCompRiskFreq package is 
+\begin{align}
+f(x) & = \kappa \alpha x^{\alpha-1} \exp(-\kappa x^{\alpha})
+\end{align}
+The estimates are reported on a log scale. 
+\begin{align}
+\alpha & = \exp(lalpha) \\
+\sigma & = \exp(-lkappa / \alpha)
+\end{align}
+
+```{r, eval=T,echo=T}
+bs_hazard_1 <- data.frame(param = rep(paste0("alpha1 = ", alpha1_true, 
+                                            ", kappa1 = ", kappa1_true %>% round(2)), 
+                                      length(tseq_pred)), 
+                          type = "h1", 
+                          time = tseq_pred, 
+                          bs_hazard = dweibull(x = tseq_pred, 
+                                               shape = alpha1_true, 
+                                               scale = exp(-log(kappa1_true) / alpha1_true)))
+
+
+# baseline hazard for terminal event 
+bs_hazard_2 <- data.frame(param = rep(paste0("alpha2 = ", alpha2_true, 
+                                            ", kappa2 = ", kappa2_true %>% round(2)), 
+                                      length(tseq_pred)), 
+                          type = "h2", 
+                          time = tseq_pred, 
+                          bs_hazard = dweibull(x = tseq_pred, 
+                                               shape = alpha2_true, 
+                                               scale = exp(-log(kappa2_true) / alpha2_true)))
+
+# conditional baseline hazard 
+bs_hazard_3 <- data.frame(param = rep(paste0("alpha3 = ", alpha3_true, 
+                                            ", kappa3 = ", kappa3_true %>% round(2)), 
+                                      length(tseq_pred)), 
+                          type = "h3", 
+                          time = tseq_pred, 
+                          bs_hazard = dweibull(x = tseq_pred, 
+                                               shape = alpha3_true, 
+                                               scale = exp(-log(kappa3_true) / alpha3_true)))
+
+true_bs_hazards <- rbind(bs_hazard_1, 
+                         bs_hazard_2,
+                         bs_hazard_3)
+
+# estimated baseline hazard function 
+bs_est_hazard_1 <- data.frame(type = "h1", 
+                          time = tseq_pred, 
+                          bs_hazard = dweibull(x = tseq_pred, 
+                                               shape = (bs_haz_coef %>%
+                                                 filter(name == "alpha1") %>%
+                                                 pull(beta)), 
+                                               scale = exp(-log(bs_haz_coef %>%
+                                                 filter(name == "kappa1") %>%
+                                                 pull(beta)) / (bs_haz_coef %>%
+                                                 filter(name == "alpha1") %>%
+                                                 pull(beta))))
+                                               )
+
+
+# baseline hazard for terminal event 
+bs_est_hazard_2 <- data.frame(type = "h2", 
+                          time = tseq_pred, 
+                          bs_hazard = dweibull(x = tseq_pred, 
+                                               shape = (bs_haz_coef %>%
+                                                 filter(name == "alpha2") %>%
+                                                 pull(beta)), 
+                                               scale = exp(-log(bs_haz_coef %>%
+                                                 filter(name == "kappa2") %>%
+                                                 pull(beta)) / (bs_haz_coef %>%
+                                                 filter(name == "alpha2") %>%
+                                                 pull(beta))))
+                                               )
+
+# conditional baseline hazard 
+bs_est_hazard_3 <- data.frame(type = "h3", 
+                          time = tseq_pred, 
+                          bs_hazard = dweibull(x = tseq_pred, 
+                                               shape = (bs_haz_coef %>%
+                                                 filter(name == "alpha12") %>%
+                                                 pull(beta)), 
+                                               scale = exp(-log(bs_haz_coef %>%
+                                                 filter(name == "kappa12") %>%
+                                                 pull(beta)) / (bs_haz_coef %>%
+                                                 filter(name == "alpha12") %>%
+                                                 pull(beta))))
+                                               )
+
+
+est_bs_hazards <- rbind(bs_est_hazard_1, 
+                        bs_est_hazard_2, 
+                        bs_est_hazard_3)
+
+ggplot(data = true_bs_hazards, 
+       aes(x = time,
+           y = bs_hazard, 
+           color = type)) +
+  geom_line(linetype = "dashed") +
+  geom_line(data = est_bs_hazards,
+            aes(x = time,
+                y = bs_hazard,
+                color = type)) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(y = "baseline hazard function", 
+       color = "")
+
+```
+
+
+

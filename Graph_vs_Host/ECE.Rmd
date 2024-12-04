@@ -1,0 +1,560 @@
+---
+title: "Semi-Competing Risks - Calibration metrics"
+output: html_document
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+# {.tabset .tabset-fade .tabset-pills} 
+
+## Setup
+
+```{r, echo=T,message=F,warning=F,results='hide'}
+library(tidyverse)
+library(knitr)
+library(ggpubr)
+
+library(survival)
+
+library(SemiCompRisks)
+library(SemiCompRisksFreq)
+library(splines2)
+
+library(cmprsk)
+library(survival)
+library(rlist)
+
+# for all the metrics 
+library(pec)
+library(pROC)
+library(mccr)
+
+library(xtable)
+
+
+
+# use Harrison's color coding 
+#color blind friendly colors from here: https://davidmathlogic.com/colorblind/#%23648FFF-%23785EF0-%23DC267F-%23FE6100-%23FFB000
+cb_blue <- "#648FFF"; cb_red <- "#DC267F"; cb_purple <- "#785EF0"; cb_orange <- "#FE6100"; cb_grey <- "#CACACA"
+
+#pink and green color-blind friendly color palette, with two colors (pink and green)
+#each in two shades: light and dark
+four_color_paired <- RColorBrewer::brewer.pal(n=4,name="PiYG")[c(3,4,2,1)]
+
+
+#other colors used in plots
+two_color_cb <- c(cb_blue,cb_red)
+
+three_color <- c("dodgerblue","firebrick3","purple3")
+three_color_cb <- c(cb_blue,cb_red,cb_purple)
+
+#take three cb colors and reduce V from 100 to 60
+three_color_cb_dark <- c("#3b5699", "#751342", "#453589")
+
+four_color <- c("lightgray","firebrick3","purple3","dodgerblue")
+four_color_cb <- c(cb_grey,cb_red,cb_purple,cb_blue)
+four_color_forest <- c("dodgerblue","firebrick3","purple3","magenta")
+four_color_forest_cb <- c(cb_blue,cb_red,cb_purple,cb_orange)
+five_color <- c("lightgray","firebrick3","magenta","purple3","dodgerblue")
+five_color_cb <- c(cb_grey,cb_red,cb_orange,cb_purple,cb_blue)
+
+four_color_grey <- c("grey80","grey60","grey40","grey20")
+five_color_grey <- c("grey80","grey60","grey40","grey20","black")
+
+# RColorBrewer::display.brewer.all(n=4,colorblindFriendly = TRUE)
+# color-blind friendly categorical colors
+three_color_qual <- RColorBrewer::brewer.pal(n=3,name="Set2")
+four_color_qual <- RColorBrewer::brewer.pal(n=4,name="Dark2")
+five_color_qual <- RColorBrewer::brewer.pal(n=5,name="Dark2")
+
+```
+
+
+## Functions 
+```{r, echo=T,message=F,warning=F,results='hide'}
+h3tv_knots_temp <- c(3, 8, 15.5)
+# define basis function for piecewise effect of non-terminal time on terminal time 
+h3_b_fun <- function(x) splines2::bSpline(x,
+                                          knots = h3tv_knots_temp,
+                                          Boundary.knots = c(0,Inf),
+                                          degree = 0,intercept = FALSE)
+
+# function to plot risk profile 
+plot_risk_profile <- function(tseq_pred,
+                              ValPred, 
+                              ValDat, 
+                              i, 
+                              colors = four_color_cb, 
+                              t_end) {
+  length_tseq <- length(tseq_pred)
+  
+  # format data frame 
+  plot_frame <- data.frame(
+    Time = rep(tseq_pred, 4),
+    Probability = c(ValPred$p_neither[, i], 
+                    ValPred$p_term_only[, i],
+                    ValPred$p_both[, i],
+                    ValPred$p_nonterm_only[, i]),
+    Outcome=factor(x = c(rep("Neither",length_tseq),
+                         rep("Terminal Only",length_tseq),
+                         rep("Both",length_tseq),
+                         rep("Nonterminal Only",length_tseq)),
+                   levels = c("Neither",
+                              "Terminal Only",
+                              "Both",
+                              "Nonterminal Only"))
+  )
+  
+    g <- ggplot() +
+    geom_area(plot_frame, 
+              mapping = aes(x = Time, 
+                  y = Probability, 
+                  colour = Outcome, 
+                  fill = Outcome)) +
+    scale_color_manual(values = colors) +
+    scale_fill_manual(values = colors) + 
+    theme_bw() +
+    labs(title = paste0("Patient ", i, collapse = ""))
+    
+    if(ValDat[i, ]$agvhd24 == 1) {
+    trueT1 <- ValDat[i, ]$intxagvhd24_cens
+    
+    g <- g +
+      geom_step(data = data.frame(time = c(0, trueT1, t_end), 
+                                  ind = c(0, 1, 1)), 
+                aes(x = time, 
+                    y = ind), 
+                 linetype = "dashed", 
+                 color = "red")
+    
+  }
+  if(ValDat[i, ]$dead_cens == 1) {
+    trueT2 <- ValDat[i, ]$intxdeath_cens
+    
+     g <- g +
+      geom_step(data = data.frame(time = c(0, trueT2, t_end), 
+                                  ind = c(0, 1, 1)), 
+                aes(x = time, 
+                    y = ind), 
+                linetype = "dashed", 
+                 color = "black")
+  }
+
+    return(g)
+}
+
+
+plot_RMTL_profile <- function(tseq_pred,
+                              ValPred, ValDat, 
+                              i, 
+                              colors = four_color_cb) {
+  
+  RMTL <- data.frame(time = tseq_pred, 
+                     RMTL_NT = c(0, rep(NA, length(tseq_pred) - 1)), 
+                     RMTL_T = c(0, rep(NA, length(tseq_pred)- 1)), 
+                     RMTL_NT_T = c(0, rep(NA, length(tseq_pred) - 1)), 
+                     RMTL_HA = c(0, rep(NA, length(tseq_pred) - 1))
+  )
+  
+  for (t in tseq_pred[-1]) {
+    
+    tseq_temp <- ValPred$tseq[ValPred$tseq <= t]
+    P_nonterm_temp <- ValPred$p_nonterm_only[seq(1, length(tseq_temp)), i]
+    P_term_temp <- ValPred$p_term_only[seq(1, length(tseq_temp)), i]
+    P_both_temp <- ValPred$p_both[seq(1, length(tseq_temp)), i]
+    P_neither_temp <- ValPred$p_neither[seq(1, length(tseq_temp)), i]
+    
+    RMTL[t + 1, ]$RMTL_NT <- as.vector(c(0.5, diff(tseq_temp)[-1], 0.5) %*% 
+                                         P_nonterm_temp)
+    
+    RMTL[t + 1, ]$RMTL_T <- as.vector(c(0.5, diff(tseq_temp)[-1], 0.5) %*% 
+                                        P_term_temp) 
+    
+    RMTL[t + 1, ]$RMTL_NT_T <- as.vector(c(0.5, diff(tseq_temp)[-1], 0.5) %*% 
+                                           P_both_temp) 
+    
+    RMTL[t + 1, ]$RMTL_HA <- as.vector(c(0.5, diff(tseq_temp)[-1], 0.5) %*% 
+                                         P_neither_temp) 
+  }
+  
+  RMTL_df <- RMTL %>% 
+    gather(key = "name", 
+           value = "RMTL", 
+           -time)
+  
+  # plot RMTL over time 
+  g <- ggplot(data = RMTL_df, 
+              aes(x = time, 
+                  y = RMTL,
+                  color = name, 
+                  fill = name)) +
+    geom_area(position = "stack") +
+    # geom_line() +
+    theme_bw() +
+    theme(legend.position = "bottom") +
+    scale_color_manual(values = colors) +
+    scale_fill_manual(values = colors) + 
+    labs(color = "", fill = "", 
+         x = "Truncation time", 
+         title = paste0("Patient ", i, collapse = ""))
+  
+  
+      if(ValDat[i, ]$agvhd24 == 1) {
+    trueT1 <- ValDat[i, ]$intxagvhd24_cens
+    
+    g <- g +
+      geom_vline(aes(xintercept = trueT1), 
+                 linetype = "dashed", 
+                 color = "red")
+    
+  }
+  if(ValDat[i, ]$dead_cens == 1) {
+    trueT2 <- ValDat[i, ]$intxdeath_cens
+    
+     g <- g +
+      geom_vline(aes(xintercept = trueT2), 
+                 linetype = "dashed", 
+                 color = "black")
+  }
+    return(g)
+}
+
+```
+## Data 
+The data is given in terms of days. 
+
+
+There are 6459 patients suffering from graft-vs-host-disease and 1823 patients die. 
+816 patients die after experiencing graft-vs-host-disease.
+
+```{r, echo=T,message=F,warning=F,results='hide'}
+load("/Users/stephaniearmbruster/Desktop/Grant/R/Graft_vs_host_dataset/CIBMTR_cleaned05042923.RData")
+
+# data check 
+cibmtr %>% nrow()
+cibmtr %>% colnames()
+
+# delete missing values 
+# complete case analysis for covariates of interest 
+cibmtr_analysis <- cibmtr[!is.na(cibmtr$agvhd24) & !is.na(cibmtr$intxagvhd24), ]
+cibmtr_analysis <- cibmtr_analysis[!is.na(cibmtr_analysis$age) & !is.na(cibmtr_analysis$stage), ]
+
+# non-terminal event: acute graft-vs-host-disease 
+cibmtr_analysis$intxagvhd24_cens %>% range()
+cibmtr_analysis$agvhd24 %>% table()
+
+# terminal event: death 
+cibmtr_analysis$intxdeath_cens %>% range()
+cibmtr_analysis$dead_cens %>% table()
+
+# joint 
+table(cibmtr_analysis$agvhd24, cibmtr_analysis$dead_cens)
+```
+
+## Fit shared frailty Illness-Death model 
+```{r, echo=T,message=F,warning=F,results='hide'}
+# define formula 
+# time1 + eventindicator1 | time2 + eventindicator2
+form <- Formula(intxagvhd24_cens + agvhd24 | intxdeath_cens + dead_cens ~ sexFemale+ageless20+age20to39+age40to59+stageIntermediate+stageAdvanced
+                | sexFemale+ageless20+age20to39+age40to59+stageIntermediate+stageAdvanced 
+                | sexFemale+ageless20+age20to39+age40to59+stageIntermediate+stageAdvanced)
+
+cibmtr_fit_freq <- FreqID_HReg2(form, 
+                               data=cibmtr_analysis,
+                               model="semi-Markov", 
+                               frailty=TRUE, 
+                               subset=NULL)
+
+cibmtr_fit_freq %>% summary()
+
+# predict for a certain time window 
+tseq_pred <- seq(0, 3.5, by = 0.1)
+cibmtr_fit_pred <- predict(cibmtr_fit_freq, 
+                              tseq = tseq_pred)
+```
+
+
+## Coefficients for hazard function 
+```{r, echo=T,message=F,warning=F,results='show'}
+HR <- round(exp(summary(cibmtr_fit_freq)$coef), 2)
+HR_table <- t(apply(X = HR,
+                    MARGIN = 1,
+                    FUN = function(x){c(paste0(x[1],
+                                               " (",x[2],
+                                               ", ",x[3],")"),
+                                        paste0(x[4]," (",x[5],", ",x[6],")"),
+                                        paste0(x[7]," (",x[8],", ",x[9],")"))}))
+colnames(HR_table) <- c("Hazard 1", 
+                        "Hazard 2", 
+                        "Hazard 3")
+
+# xtable(HR_table)
+```
+The coefficients for the shared frailty illness death model are: 
+```{r, echo=F,message=F,warning=F,results='show'}
+knitr::kable(HR_table)
+```
+
+
+
+
+## Visualization of hazard function  
+```{r, echo=T,message=F,warning=F,results='show'}
+plot(cibmtr_fit_pred, plot.est = "Haz")
+plot(cibmtr_fit_pred, plot.est = "CumHaz")
+plot(cibmtr_fit_pred, plot.est = "Surv")
+
+```
+## Risk prediction  
+No separation in training and validation data 
+
+```{r, echo=T,message=F,warning=F,results='show'}
+# extract design matric 
+DesignX <- cibmtr_analysis %>% 
+  dplyr::select(sexFemale, ageless20, age20to39, age40to59, stageIntermediate, stageAdvanced) %>% 
+  as.matrix()
+
+# predict individual risk profiles 
+cibmtr_fit_pred <- SemiCompRisksFreq:::pred_risk_ID(tseq = tseq_pred,
+                                            para = cibmtr_fit_freq$estimate,
+                                            
+                                            x1new = DesignX, 
+                                            x2new = DesignX, 
+                                            x3new = DesignX,
+                                            
+                                            frailty = cibmtr_fit_freq$frailty, 
+                                            model = cibmtr_fit_freq$model,
+                                            nP0 = cibmtr_fit_freq$nP0, 
+                                            nP = cibmtr_fit_freq$nP,
+                                            p3tv = 0, 
+                                            h3tv_basis_func = h3_b_fun, 
+                                            hazard = cibmtr_fit_freq$hazard,
+                                            knots_list = cibmtr_fit_freq$knots_list,
+                                            n_quad = cibmtr_fit_freq$n_quad, 
+                                            quad_method = cibmtr_fit_freq$quad_method,
+                                            Finv = NULL, 
+                                            alpha = 0.05)
+```
+
+### Risk profiles 
+
+```{r, echo=T,message=F,warning=F,results='show', out.width = '1000px', dpi=300}
+trunc_time <- 3.5
+
+
+g_list <- list()
+j <- 1 
+
+for (i in c(1, 10, 300, 500, 700, 1000)) {
+  
+  g <- plot_risk_profile(tseq_pred = tseq_pred, 
+                         ValPred = cibmtr_fit_pred, 
+                         ValDat = cibmtr_analysis, 
+                         i = i, 
+                         t_end = trunc_time)
+  
+  g_list[[j]] <- g 
+  j <- j + 1
+  
+}
+
+ggarrange(plotlist = g_list, 
+          nrow = 2, ncol = 3, 
+          common.legend = TRUE,
+          legend = "bottom")
+```
+
+## ROC analysis 
+```{r, echo=T,message=F,warning=F,results='show', out.width = '1000px', dpi=300}
+sens_spec_list <- list()
+ROC_list <- list()
+
+j <- 1 
+for (t in c(1, 2, 3)) {
+  
+  t_i <- which(cibmtr_fit_pred$tseq == t)
+  
+  valDat_temp <- cibmtr_analysis %>% 
+    mutate(PP_nonterm = cibmtr_fit_pred$p_nonterm_only[t_i, ], 
+           PP_term = cibmtr_fit_pred$p_term_only[t_i, ], 
+           PP_both = cibmtr_fit_pred$p_both[t_i, ], 
+           PP_ha = cibmtr_fit_pred$p_neither[t_i, ], 
+           
+           # indicator for each state 
+           delta_nonterm = as.numeric(intxagvhd24_cens <= t & agvhd24 == 1 & intxdeath_cens > t), 
+           delta_term = as.numeric(intxdeath_cens <= t & agvhd24 == 0 & dead_cens == 1), 
+           delta_both = as.numeric(intxagvhd24_cens <= t & agvhd24 == 1 & intxdeath_cens <= t & dead_cens == 1), 
+           delta_ha = as.numeric(intxagvhd24_cens > t & intxdeath_cens > t)
+           )
+  
+  ROC_nonterm <- roc(valDat_temp$delta_nonterm, 
+                    valDat_temp$PP_nonterm)
+  
+  ROC_term <- roc(valDat_temp$delta_term, 
+                    valDat_temp$PP_term)
+  
+  ROC_both <- roc(valDat_temp$delta_both, 
+                    valDat_temp$PP_both)
+  
+  ROC_neither <- roc(valDat_temp$delta_ha, 
+                    valDat_temp$PP_ha)
+  
+  ROC_list[[j]] <- data.frame(time = t, 
+                              AUC_nonterm = ROC_nonterm$auc, 
+                              AUC_term = ROC_term$auc, 
+                              AUC_both = ROC_both$auc, 
+                              AUC_neither = ROC_neither$auc)
+  
+  sens_spec_list[[j]] <- data.frame(time = t, 
+                              type = c(rep("Non-Terminal", length(ROC_nonterm$sensitivities)), 
+                                       rep("Terminal", length(ROC_term$sensitivities)), 
+                                       rep("Both", length(ROC_both$sensitivities)), 
+                                       rep("Healthy and Alive", length(ROC_neither$sensitivities))
+                                       ), 
+                              sens = c(ROC_nonterm$sensitivities, 
+                                       ROC_term$sensitivities, 
+                                       ROC_both$sensitivities, 
+                                       ROC_neither$sensitivities), 
+                              spec = c(ROC_nonterm$specificities,
+                                       ROC_term$specificities, 
+                                       ROC_both$specificities,
+                                       ROC_neither$specificities)
+                              ) 
+  
+  j <- j + 1
+}
+
+ROC_df <- list.rbind(ROC_list)
+sens_spec_df <- list.rbind(sens_spec_list)
+
+g1 <- ggplot(data = sens_spec_df %>% filter(time == 1), 
+       aes(y = sens, 
+           x = 1 - spec, 
+           color = type)) +
+  geom_line() +
+  facet_grid(~ type) +
+  theme_bw() +
+  labs(y = "Sensitivity", 
+       x = "1 - Specificity", 
+       color = "", 
+       title = "ROC at t=1") +
+  geom_abline(aes(intercept = 0, 
+                  slope = 1), 
+              linetype = "dashed", 
+              color = "grey")
+
+g2 <- ggplot(data = sens_spec_df %>% filter(time == 2), 
+       aes(y = sens, 
+           x = 1 - spec, 
+           color = type)) +
+  geom_line() +
+  facet_grid(~ type) +
+  theme_bw() +
+  labs(y = "Sensitivity", 
+       x = "1 - Specificity", 
+       color = "", 
+       title = "ROC at t=2") +
+  geom_abline(aes(intercept = 0, 
+                  slope = 1), 
+              linetype = "dashed", 
+              color = "grey")
+
+g3 <- ggplot(data = sens_spec_df %>% filter(time == 3), 
+       aes(y = sens, 
+           x = 1 - spec, 
+           color = type)) +
+  geom_line() +
+  facet_grid(~ type) +
+  theme_bw() +
+  labs(y = "Sensitivity", 
+       x = "1 - Specificity", 
+       color = "", 
+       title = "ROC at t=3") +
+  geom_abline(aes(intercept = 0, 
+                  slope = 1), 
+              linetype = "dashed", 
+              color = "grey")
+
+ggarrange(g1, g2, g3, 
+          nrow = 3, 
+          common.legend = TRUE, legend = "bottom")
+
+ROC_df %>% unique()
+```
+
+
+
+
+## Expected calibration error  
+
+```{r, echo=T,message=F,warning=F,results='show', out.width = '1000px', dpi=300}
+ECE_list  <- list()
+j <- 1
+
+# all landmark points
+for (t in tseq_pred) {
+  
+  t_i <- which(cibmtr_fit_pred$tseq == t)
+  
+  ECE_list[[j]] <- cibmtr_analysis %>% 
+    mutate(PP_nonterm = cibmtr_fit_pred$p_nonterm_only[t_i, ], 
+           PP_term = cibmtr_fit_pred$p_term_only[t_i, ], 
+           PP_both = cibmtr_fit_pred$p_both[t_i, ], 
+           PP_ha = cibmtr_fit_pred$p_neither[t_i, ], 
+           
+           # indicator for each state 
+           delta_nonterm = as.numeric(intxagvhd24_cens <= t & agvhd24 == 1 & intxdeath_cens > t), 
+           delta_term = as.numeric(intxdeath_cens <= t & agvhd24 == 0 & dead_cens == 1), 
+           delta_both = as.numeric(intxagvhd24_cens <= t & agvhd24 == 1 & intxdeath_cens <= t & dead_cens == 1), 
+           delta_ha = as.numeric(intxagvhd24_cens > t & intxdeath_cens > t)
+           )%>% 
+    summarize(
+      time = t, 
+      "Nonterminal" = mean(abs(PP_nonterm - delta_nonterm)), 
+      "Terminal" = mean(abs(PP_term - delta_term)), 
+      "Nonterminal + Terminal" = mean(abs(PP_both - delta_both)), 
+      "Healthy and Alive" = mean(abs(PP_ha - delta_ha))
+    )
+  
+  j <- j + 1 
+}
+
+ECE_df <- ECE_list %>% 
+  list.rbind() %>% 
+  gather(type, 
+         ece, 
+         -time)
+
+# visualize over time 
+ggplot(data = ECE_df, 
+       aes(x = time, 
+           y  = ece, 
+           color = type)) +
+  geom_point() +
+  geom_line() +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(x = "Time", 
+       y = "Expected calibration error (ECE)", 
+       color = "")
+
+```
+
+
+### Integrated expected calibration error 
+```{r, echo=T,message=F,warning=F,results='show', out.width = '1000px', dpi=300}
+ECE_df %>% 
+  group_by(type) %>% 
+  mutate(time_lag = c(0, lag(time) %>% na.omit()), 
+         auc_part = ece * (time - time_lag)) %>% 
+  summarize(iECE = sum(auc_part), 
+            stand_iECE = iECE / 3.5)
+
+
+```
+
+
+
+
+
+
+

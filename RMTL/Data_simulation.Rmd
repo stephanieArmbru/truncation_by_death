@@ -1,0 +1,338 @@
+
+---
+title: "Semi-Competing Risk profiles - Restricted Mean Time Lost"
+output: html_document
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+# {.tabset .tabset-fade .tabset-pills} 
+
+## Setup
+
+```{r, echo=T,message=F,warning=F,results='hide'}
+library(tidyverse)
+library(knitr)
+library(ggpubr)
+
+library(survival)
+
+library(SemiCompRisks)
+library(SemiCompRisksFreq)
+library(splines2)
+
+
+# use Harrison's color coding 
+#color blind friendly colors from here: https://davidmathlogic.com/colorblind/#%23648FFF-%23785EF0-%23DC267F-%23FE6100-%23FFB000
+cb_blue <- "#648FFF"; cb_red <- "#DC267F"; cb_purple <- "#785EF0"; cb_orange <- "#FE6100"; cb_grey <- "#CACACA"
+
+#pink and green color-blind friendly color palette, with two colors (pink and green)
+#each in two shades: light and dark
+four_color_paired <- RColorBrewer::brewer.pal(n=4,name="PiYG")[c(3,4,2,1)]
+
+
+#other colors used in plots
+two_color_cb <- c(cb_blue,cb_red)
+
+three_color <- c("dodgerblue","firebrick3","purple3")
+three_color_cb <- c(cb_blue,cb_red,cb_purple)
+
+#take three cb colors and reduce V from 100 to 60
+three_color_cb_dark <- c("#3b5699", "#751342", "#453589")
+
+
+four_color <- c("lightgray","firebrick3","purple3","dodgerblue")
+four_color_cb <- c(cb_grey,cb_red,cb_purple,cb_blue)
+four_color_forest <- c("dodgerblue","firebrick3","purple3","magenta")
+four_color_forest_cb <- c(cb_blue,cb_red,cb_purple,cb_orange)
+five_color <- c("lightgray","firebrick3","magenta","purple3","dodgerblue")
+five_color_cb <- c(cb_grey,cb_red,cb_orange,cb_purple,cb_blue)
+
+four_color_grey <- c("grey80","grey60","grey40","grey20")
+five_color_grey <- c("grey80","grey60","grey40","grey20","black")
+
+# RColorBrewer::display.brewer.all(n=4,colorblindFriendly = TRUE)
+# color-blind friendly categorical colors
+three_color_qual <- RColorBrewer::brewer.pal(n=3,name="Set2")
+four_color_qual <- RColorBrewer::brewer.pal(n=4,name="Dark2")
+five_color_qual <- RColorBrewer::brewer.pal(n=5,name="Dark2")
+
+```
+
+## Simulation of semicompeting risk data 
+We simulate a training data set (n = 2000) and a validation data set (n = 1000). 
+```{r, echo=T,message=F,warning=F,results='hide'}
+set.seed(1234)
+
+# sample size for simulation data set 
+n <- 3000
+
+# 3 time-independent baseline Gaussian covariates 
+x_sim <- matrix(rnorm(3 * n), ncol = 3)
+colnames(x_sim) <- c("x1","x2","x3")
+
+
+# h3tv_knots define the intervals for each different effect of t1 on h3
+h3tv_knots_temp <- c(3, 8, 15.5)
+
+# true parameter values 
+# vectors of true regression 
+# beta1_true <- c(0.25,0.6,-0.3)
+# beta2_true <- c(0.4,0.75,-0.4)
+# beta3_true <- c(0.7,0.9,-0.9)
+
+beta1_true <- c(0.1, 0.1, -0.2)
+
+beta2_true <- c(0.4,0.75,-0.4)
+beta3_true <- c(0.7,0.9,-0.9)
+
+# true baseline hazard 
+alpha1_true <- 1
+alpha2_true <- 1
+alpha3_true <- 1
+
+
+kappa1_true <- exp(-3.0)
+kappa2_true <- exp(-3.9)
+kappa3_true <- exp(-3.3)
+
+# mean for weibull 
+wb_moments <- function(alpha, kappa) {
+   shape <- alpha
+   scale <- exp(-(log(kappa)))
+   
+   mean <- scale * gamma(1 + 1 / alpha)
+   var <- scale^2 * (gamma(1 + 2 / alpha) - gamma(1 + 1 / alpha)^2)
+   
+   return(list(mean = mean, 
+               sd = var %>% sqrt()))
+}
+
+wb_moments(alpha = alpha1_true, 
+           kappa = kappa1_true)
+wb_moments(alpha = alpha2_true, 
+           kappa = kappa2_true)
+wb_moments(alpha = alpha3_true, 
+           kappa = kappa3_true)
+
+
+theta_true <- 1
+h3tv_degree <- 0 
+h3tv_knots <- c(0,h3tv_knots_temp,Inf)
+beta3tv_true <- c(0, 0, 0)
+
+# no clustering 
+simDat <- SemiCompRisksFreq::simID2(x1 = x_sim, 
+                                    x2 = x_sim, 
+                                    x3 = x_sim, 
+                                    
+                                    # vectors of true regression 
+                                    beta1.true = beta1_true,
+                                    beta2.true = beta2_true,
+                                    beta3.true = beta3_true, 
+                                    
+                                    # true baseline hazard 
+                                    alpha1.true = alpha1_true, 
+                                    alpha2.true = alpha2_true, 
+                                    alpha3.true = alpha3_true, 
+                                    
+                                    kappa1.true = kappa1_true,
+                                    kappa2.true = kappa2_true,
+                                    kappa3.true = kappa3_true,
+                                    
+                                    # Weibull baseline hazard
+                                    hazard = "wb",
+                                    # Semi-Markov model 
+                                    model = "sm", 
+                                    # Shared gamma frailty 
+                                    frailty_type = "gamma", 
+                                    theta.true = theta_true,
+                                    
+                                    # effect of time-to non-terminal event on terminal event 
+                                    h3tv_degree = h3tv_degree, 
+                                    h3tv_knots = h3tv_knots,
+                                    beta3tv.true = beta3tv_true, 
+                                    
+                                    # censoring / upper max
+                                    cens = c(100, 100)
+                                    # cens = c(0, 0)
+                                    )
+
+
+# list of true parameters
+paramList <- list(x1 = x_sim, 
+                  x2 = x_sim, 
+                  x3 = x_sim, 
+                  
+                  # vectors of true regression 
+                  beta1.true = beta1_true,
+                  beta2.true = beta2_true,
+                  beta3.true = beta3_true, 
+                  
+                  # true baseline hazard 
+                  alpha1.true = alpha1_true, 
+                  alpha2.true = alpha2_true, 
+                  alpha3.true = alpha3_true, 
+                  
+                  kappa1.true = kappa1_true,
+                  kappa2.true = kappa2_true,
+                  kappa3.true = kappa3_true,
+                  
+                  theta = theta_true, 
+                  
+                  h3tv_degree = h3tv_degree, 
+                  h3tv_knots = h3tv_knots,
+                  beta3tv.true = beta3tv_true)
+
+
+simDat %>% head()
+simDat %>% colnames()
+simDat$y1 %>% summary()
+simDat$y2 %>% summary()
+
+table(simDat$delta1, simDat$delta2)
+
+# add the x data to the data frame
+simDat <- simDat %>%  
+  cbind(id = 1:nrow(simDat), 
+        x_sim)
+
+simDat %>% head()
+
+# define basis function for piecewise effect of non-terminal time on terminal time 
+h3_b_fun <- function(x) splines2::bSpline(x,
+                                          knots = h3tv_knots_temp,
+                                          Boundary.knots = c(0,Inf),
+                                          degree = 0,intercept = FALSE)
+
+# define time and event variables to be used below
+simDat$time1 <- simDat$y1
+simDat$time2 <- simDat$y2
+simDat$event1 <- simDat$delta1
+simDat$event2 <- simDat$delta2
+# define "sojourn time" explicitly
+simDat$sojourn <- simDat$time2 - simDat$time1
+
+# create event flags 
+# define version of terminal flag that treats non-terminal event as censoring
+scrData$event2_cr <- ifelse(scrData$event1 == 1, 0, 
+                            scrData$event2)
+
+# define version of event flag that is 0 for censoring, 1 for non-terminal, 2 for terminal
+simDat$event_cr_num <- ifelse(simDat$event1 == 1, 1, 
+                              ifelse(simDat$event2 == 1, 2, 0))
+# reformat to factor variable 
+simDat$event_cr_fct <- factor(simDat$event_cr_num,levels = c("0","1","2"),
+                               labels = c("cens","nonterm","term"))
+
+# make a variable with 4 values corresponding to "observed outcome" categories
+outcome_vec <- numeric(nrow(simDat))
+outcome_vec[scrData$event1==1 & scrData$event2==0] <- 1
+outcome_vec[scrData$event1==0 & scrData$event2==1] <- 2
+outcome_vec[scrData$event1==1 & scrData$event2==1] <- 3
+simDat$outcome_cat <- factor(as.character(outcome_vec), levels=c("0","1","2","3"),
+                              labels=c("neither","nonterm_only","term_only","both"))
+
+# create a single factor variable corresponding to the cut points of t1 effect on h3
+simDat$t1_cat <- cut(simDat$time1, 
+                     breaks=c(0,h3tv_knots_temp,Inf),
+                     right = FALSE, include.lowest = TRUE)
+
+# render x1 a binary covariate 
+simDat$x1_bin <- as.numeric(simDat$x1>0)
+
+# separate training and validation data set
+random_id <- sample(seq(1, nrow(simDat)), 
+                    size = 2000, 
+                    replace = FALSE)
+
+trainDat <- simDat[random_id, ]
+valDat <- simDat[-random_id, ]
+
+
+#lastly, make a bonus dataset that "record-splits" the data into separate
+#records for time following non-terminal event, with two different "event variables"
+#one that just reports the occurrence of non-terminal and terminal events
+#one that separates "terminal without non-terminal" and "terminal following non-terminal"
+
+#rows corresponding to "first" transition
+# temp_dat1 <- simDat
+# temp_dat1$start_days <- 0
+# temp_dat1$stop_days <- simDat$time1
+# temp_dat1$ad_death_msm1 <- simDat$event_cr_num
+# temp_dat1$ad_death_msm2 <- simDat$event_cr_num
+# #rows corresponding to "second" transition if applicable
+# temp_dat2 <- simDat[simDat$event1==1,]
+# temp_dat2$start_days <- temp_dat2$time1
+# temp_dat2$stop_days <- temp_dat2$time2
+# temp_dat2$ad_death_msm1 <- ifelse(temp_dat2$event2,2,0)
+# temp_dat2$ad_death_msm2 <- ifelse(temp_dat2$event2,3,0)
+# #combine and sort data
+# simDat_long_temp <- rbind(temp_dat1,temp_dat2)
+# simDat_long <- simDat_long_temp[order(simDat_long_temp$id,simDat_long_temp$start_days),]
+# simDat_long$ad_death_msm1 <- factor(simDat_long$ad_death_msm1,levels=c("0","1","2"),labels=c("cens","nonterm","term"))
+# simDat_long$ad_death_msm2 <- factor(simDat_long$ad_death_msm2,levels=c("0","1","2","3"),labels=c("cens","nonterm_only","term_wo_nonterm","term_w_nonterm"))
+
+```
+
+
+### Visualize scatter plot for simulated data
+
+```{r, echo=T,message=F,warning=F,results='show'}
+#Empirical "Density" Plot
+scat_plot <- ggplot(data = trainDat %>% filter(event1 == 1),
+                    mapping = aes(x=time1,
+                                  y=time2, 
+                                  color=as.factor(event2))) +
+  labs(x = "Time to non-terminal event", 
+       y = "Time to terminal event", 
+       color = "Terminal event happened?") + 
+  xlim(0, 102) +
+  ylim(0, 102) +
+  geom_point(alpha=0.25, size=1) + 
+  theme_bw() +
+  geom_abline(slope=1) + 
+  theme(legend.position = "bottom")
+
+#histogram of terminal only times
+hist_plot <- ggplot(data=trainDat %>% filter(event1 == 0),
+                    mapping = aes(x=time2,
+                                  fill=as.factor(event2))) + 
+  xlim(0,102) +
+  geom_histogram(binwidth = 1,
+                 col="white",
+                 linewidth=0.25) +
+  theme_bw() + 
+  coord_flip() + 
+  labs(x = "Time to terminal event without non-terminal event", 
+       y = "Count", 
+       fill = "Terminal event happened?") +
+  theme(legend.position = "bottom", 
+        legend.title = element_blank())
+#combined "empirical joint density"
+cowplot::plot_grid(scat_plot,hist_plot, 
+                   nrow = 1, rel_widths = c(7,3))
+
+```
+
+### Event rate for terminal and non-terminal event  
+At the end of the observation period, without any intermediate censoring, only administrative censoring at 100, the event rate is 
+
+```{r}
+table(simDat$event1, simDat$event2) %>% 
+  addmargins()
+
+table(simDat$event1, simDat$event2) %>%
+  prop.table() %>% 
+  addmargins() %>% 
+  round(3)
+
+```
+
+## Save data
+```{r}
+save(trainDat, file = "Data/SimData_Training.RData")
+save(valDat, file = "Data/SimData_Validation.RData")
+
+save(paramList, file = "Data/TrueParameter_List.RData")
+```
+

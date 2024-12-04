@@ -1,0 +1,2187 @@
+
+---
+title: "Semi-Competing Risk profiles - Restricted Mean Time Lost"
+output: html_document
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+# {.tabset .tabset-fade .tabset-pills} 
+
+## Setup
+
+```{r, echo=T,message=F,warning=F,results='hide'}
+library(tidyverse)
+library(knitr)
+library(ggpubr)
+
+library(survival)
+
+library(SemiCompRisks)
+library(SemiCompRisksFreq)
+library(splines2)
+
+library(cmprsk)
+library(survival)
+library(rlist)
+
+# for all the metrics 
+library(pec)
+library(pROC)
+library(mccr)
+
+
+
+# use Harrison's color coding 
+#color blind friendly colors from here: https://davidmathlogic.com/colorblind/#%23648FFF-%23785EF0-%23DC267F-%23FE6100-%23FFB000
+cb_blue <- "#648FFF"; cb_red <- "#DC267F"; cb_purple <- "#785EF0"; cb_orange <- "#FE6100"; cb_grey <- "#CACACA"
+
+#pink and green color-blind friendly color palette, with two colors (pink and green)
+#each in two shades: light and dark
+four_color_paired <- RColorBrewer::brewer.pal(n=4,name="PiYG")[c(3,4,2,1)]
+
+
+#other colors used in plots
+two_color_cb <- c(cb_blue,cb_red)
+
+three_color <- c("dodgerblue","firebrick3","purple3")
+three_color_cb <- c(cb_blue,cb_red,cb_purple)
+
+#take three cb colors and reduce V from 100 to 60
+three_color_cb_dark <- c("#3b5699", "#751342", "#453589")
+
+four_color <- c("lightgray","firebrick3","purple3","dodgerblue")
+four_color_cb <- c(cb_grey,cb_red,cb_purple,cb_blue)
+four_color_forest <- c("dodgerblue","firebrick3","purple3","magenta")
+four_color_forest_cb <- c(cb_blue,cb_red,cb_purple,cb_orange)
+five_color <- c("lightgray","firebrick3","magenta","purple3","dodgerblue")
+five_color_cb <- c(cb_grey,cb_red,cb_orange,cb_purple,cb_blue)
+
+four_color_grey <- c("grey80","grey60","grey40","grey20")
+five_color_grey <- c("grey80","grey60","grey40","grey20","black")
+
+# RColorBrewer::display.brewer.all(n=4,colorblindFriendly = TRUE)
+# color-blind friendly categorical colors
+three_color_qual <- RColorBrewer::brewer.pal(n=3,name="Set2")
+four_color_qual <- RColorBrewer::brewer.pal(n=4,name="Dark2")
+five_color_qual <- RColorBrewer::brewer.pal(n=5,name="Dark2")
+
+```
+
+## Functions 
+```{r, echo=T,message=F,warning=F,results='hide'}
+h3tv_knots_temp <- c(3, 8, 15.5)
+# define basis function for piecewise effect of non-terminal time on terminal time 
+h3_b_fun <- function(x) splines2::bSpline(x,
+                                          knots = h3tv_knots_temp,
+                                          Boundary.knots = c(0,Inf),
+                                          degree = 0,intercept = FALSE)
+
+
+# function to plot risk profile 
+plot_risk_profile <- function(tseq_pred,
+                              ValPred, ValDat = valDat, 
+                              i, 
+                              colors = four_color_cb, 
+                              t_end) {
+  length_tseq <- length(tseq_pred)
+  
+  # format data frame 
+  plot_frame <- data.frame(
+    Time = rep(tseq_pred, 4),
+    Probability = c(ValPred$p_neither[, i], 
+                    ValPred$p_term_only[, i],
+                    ValPred$p_both[, i],
+                    ValPred$p_nonterm_only[, i]),
+    Outcome=factor(x = c(rep("Neither",length_tseq),
+                         rep("Terminal Only",length_tseq),
+                         rep("Both",length_tseq),
+                         rep("Nonterminal Only",length_tseq)),
+                   levels = c("Neither",
+                              "Terminal Only",
+                              "Both",
+                              "Nonterminal Only"))
+  )
+  
+    g <- ggplot() +
+    geom_area(plot_frame, 
+              mapping = aes(x = Time, 
+                  y = Probability, 
+                  colour = Outcome, 
+                  fill = Outcome)) +
+    scale_color_manual(values = colors) +
+    scale_fill_manual(values = colors) + 
+    theme_bw() +
+    labs(title = paste0("Patient ", i, collapse = ""))
+    
+    if(ValDat[i, ]$event1 == 1) {
+    trueT1 <- ValDat[i, ]$time1
+    
+    g <- g +
+      geom_step(data = data.frame(time = c(0, trueT1, t_end), 
+                                  ind = c(0, 1, 1)), 
+                aes(x = time, 
+                    y = ind), 
+                 linetype = "dashed", 
+                 color = "red")
+    
+  }
+  if(ValDat[i, ]$event2 == 1) {
+    trueT2 <- ValDat[i, ]$time2
+    
+     g <- g +
+      geom_step(data = data.frame(time = c(0, trueT2, t_end), 
+                                  ind = c(0, 1, 1)), 
+                aes(x = time, 
+                    y = ind), 
+                linetype = "dashed", 
+                 color = "black")
+  }
+
+    return(g)
+}
+
+# function to plot risk profile 
+plot_risk_profile_grant <- function(tseq_pred,
+                              ValPred, ValDat = valDat, 
+                              i, 
+                              colors = four_color_cb, 
+                              t_end) {
+  length_tseq <- length(tseq_pred)
+  
+  # format data frame 
+  plot_frame <- data.frame(
+    Time = rep(tseq_pred, 4),
+    Probability = c(ValPred$p_neither[, i], 
+                    ValPred$p_term_only[, i],
+                    ValPred$p_both[, i],
+                    ValPred$p_nonterm_only[, i]),
+    Outcome=factor(x = c(rep("Alive without ICD shock",length_tseq),
+                         rep("Death",length_tseq),
+                         rep("ICD shock + Death",length_tseq),
+                         rep("ICD shock",length_tseq)),
+                   levels = c("Alive without ICD shock",
+                              "Death",
+                              "ICD shock + Death",
+                              "ICD shock"))
+  )
+  
+    g <- ggplot() +
+    geom_area(plot_frame, 
+              mapping = aes(x = Time, 
+                  y = Probability, 
+                  colour = Outcome, 
+                  fill = Outcome)) +
+    scale_color_manual(values = colors) +
+    scale_fill_manual(values = colors) + 
+    theme_bw() +
+    labs(title = paste0("Patient ", i, collapse = ""))
+    
+  #   if(ValDat[i, ]$event1 == 1) {
+  #   trueT1 <- ValDat[i, ]$time1
+  #   
+  #   g <- g +
+  #     geom_step(data = data.frame(time = c(0, trueT1, t_end), 
+  #                                 ind = c(0, 1, 1)), 
+  #               aes(x = time, 
+  #                   y = ind), 
+  #                linetype = "dashed", 
+  #                color = "red")
+  #   
+  # }
+  # if(ValDat[i, ]$event2 == 1) {
+  #   trueT2 <- ValDat[i, ]$time2
+  #   
+  #    g <- g +
+  #     geom_step(data = data.frame(time = c(0, trueT2, t_end), 
+  #                                 ind = c(0, 1, 1)), 
+  #               aes(x = time, 
+  #                   y = ind), 
+  #               linetype = "dashed", 
+  #                color = "black")
+  # }
+
+    return(g)
+}
+
+
+
+plot_RMTL_profile <- function(tseq_pred,
+                              ValPred, ValDat = valDat, 
+                              i, 
+                              colors = four_color_cb) {
+  
+  RMTL <- data.frame(time = tseq_pred, 
+                     RMTL_NT = c(0, rep(NA, length(tseq_pred) - 1)), 
+                     RMTL_T = c(0, rep(NA, length(tseq_pred)- 1)), 
+                     RMTL_NT_T = c(0, rep(NA, length(tseq_pred) - 1)), 
+                     RMTL_HA = c(0, rep(NA, length(tseq_pred) - 1))
+  )
+  
+  for (t in tseq_pred[-1]) {
+    
+    tseq_temp <- ValPred$tseq[ValPred$tseq <= t]
+    P_nonterm_temp <- ValPred$p_nonterm_only[seq(1, length(tseq_temp)), i]
+    P_term_temp <- ValPred$p_term_only[seq(1, length(tseq_temp)), i]
+    P_both_temp <- ValPred$p_both[seq(1, length(tseq_temp)), i]
+    P_neither_temp <- ValPred$p_neither[seq(1, length(tseq_temp)), i]
+    
+    RMTL[t + 1, ]$RMTL_NT <- as.vector(c(0.5, diff(tseq_temp)[-1], 0.5) %*% 
+                                         P_nonterm_temp)
+    
+    RMTL[t + 1, ]$RMTL_T <- as.vector(c(0.5, diff(tseq_temp)[-1], 0.5) %*% 
+                                        P_term_temp) 
+    
+    RMTL[t + 1, ]$RMTL_NT_T <- as.vector(c(0.5, diff(tseq_temp)[-1], 0.5) %*% 
+                                           P_both_temp) 
+    
+    RMTL[t + 1, ]$RMTL_HA <- as.vector(c(0.5, diff(tseq_temp)[-1], 0.5) %*% 
+                                         P_neither_temp) 
+  }
+  
+  RMTL_df <- RMTL %>% 
+    gather(key = "name", 
+           value = "RMTL", 
+           -time)
+  
+  # plot RMTL over time 
+  g <- ggplot(data = RMTL_df, 
+              aes(x = time, 
+                  y = RMTL,
+                  color = name, 
+                  fill = name)) +
+    geom_area(position = "stack") +
+    # geom_line() +
+    theme_bw() +
+    theme(legend.position = "bottom") +
+    scale_color_manual(values = colors) +
+    scale_fill_manual(values = colors) + 
+    labs(color = "", fill = "", 
+         x = "Truncation time", 
+         title = paste0("Patient ", i, collapse = ""))
+  
+  if(ValDat[i, ]$event1 == 1) {
+    trueT1 <- ValDat[i, ]$time1
+    
+        g <- g +
+      geom_vline(aes(xintercept = trueT1), 
+                 linetype = "dashed", 
+                 color = "red")
+    
+  }
+  if(valDat[i, ]$event2 == 1) {
+    trueT2 <- ValDat[i, ]$time2
+    
+     g <- g +
+      geom_vline(aes(xintercept = trueT2), 
+                 linetype = "dashed", 
+                 color = "black")
+  }
+
+    return(g)
+}
+
+
+
+
+```
+
+## Load Data 
+```{r, echo=T,message=F,warning=F,results='show'}
+# load data file 
+load(file = "Data/SimData_Training.RData")
+load(file = "Data/SimData_Validation.RData")
+
+
+load(file = "Data/TrueParameter_List.RData")
+
+# extract true parameters
+x_sim <- paramList$x1
+
+beta1_true <- paramList$beta1.true
+beta2_true <- paramList$beta2.true
+beta3_true <- paramList$beta3.true
+
+alpha1_true <- paramList$alpha1.true
+alpha2_true <- paramList$alpha2.true
+alpha3_true <- paramList$alpha3.true
+
+
+kappa1_true <- paramList$kappa1.true
+kappa2_true <- paramList$kappa2.true
+kappa3_true <- paramList$kappa3.true
+
+h3tv_degree <- paramList$h3tv_degree 
+h3tv_knots <- paramList$h3tv_knots
+beta3tv_true <- paramList$beta3tv.true
+
+
+theta_true <- paramList$theta
+
+```
+
+
+## Shared frailty Illness-Death model with piecewise baseline hazard 
+
+The baseline hazard is modeled to follow a piecewise form, with 20 knots. 
+
+```{r, echo=T,message=F,warning=F,results='show'}
+# define formula 
+form_temp_no_t1cat <- Formula::Formula(time1 + event1 | time2 + event2 ~ x1 + x2 + x3 | x1 + x2 + x3 | x1 + x2 + x3 )
+
+SFID_no_t1cat <- 
+  # SemiCompRisksFreq::
+  
+  FreqID_HReg2(Formula = form_temp_no_t1cat, 
+               data = trainDat,
+               hazard = "pw", 
+               model = "semi-Markov",
+               # number of baseline parameters 
+               nP0 = c(10, 10, 10),
+               frailty = TRUE, 
+               optim_method = "BFGS",
+               extra_starts = 0)
+
+SFID_no_t1cat %>% summary()
+
+```
+
+### Visualize fitted shared frailty Illness-Death model 
+We are restricting ourselves to a time window 0 to 100. 
+Since no censoring was modeled, the terminal event time for some patients might be very high. 
+
+```{r, echo=T,message=F,warning=F,results='show'}
+# estimate for a certain time window 
+tseq_pred <- seq(0, 100)
+
+SFID_no_t1cat_pred <- predict(SFID_no_t1cat, 
+                              tseq = tseq_pred)
+
+plot(SFID_no_t1cat_pred, plot.est = "Haz")
+plot(SFID_no_t1cat_pred, plot.est = "CumHaz")
+plot(SFID_no_t1cat_pred, plot.est = "Surv")
+
+```
+
+
+### Forest plot for model coefficients 
+The covariate coefficients for the marginal and conditional hazard functions are accurately estimated. 
+
+
+
+```{r, eval=T,echo=T}
+SFID_coef <- summary(SFID_no_t1cat)$coef_long %>% 
+  as.data.frame() %>% 
+  mutate(name = c("beta1.1", "beta1.2", "beta1.3", 
+                  "beta2.1", "beta2.2", "beta2.3", 
+                  "beta3.1", "beta3.2", "beta3.3"), 
+         haz = c(rep("non-terminal", 3), 
+                 rep("terminal", 3), 
+                 rep("terminal | non-terminal", 3)))
+
+SFID_coef_true <- data.frame(name = c("beta1.1", "beta1.2", "beta1.3", 
+                                      "beta2.1", "beta2.2", "beta2.3", 
+                                      "beta3.1", "beta3.2", "beta3.3"), 
+                             true_coef = c(beta1_true, beta2_true, beta3_true), 
+                             haz = c(rep("non-terminal", 3), 
+                                     rep("terminal", 3), 
+                                     rep("terminal | non-terminal", 3)))
+
+ggplot(data = SFID_coef, 
+       aes(x = name, 
+           y = beta, 
+           color = haz %>% as.factor())) +
+  geom_point() +
+  geom_point(data = SFID_coef_true, 
+             aes(x = name, 
+                 y = true_coef, 
+                 color = haz %>% as.factor(), 
+                 shape = "True coef."),
+             size = 4) +
+  geom_errorbar(aes(ymin = beta - 1.96 * SE, 
+                    ymax = beta + 1.96 * SE)) +
+  coord_flip() +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(y = "Coefficients", 
+       x = "", 
+       color = "", 
+       shape = "") +
+  scale_shape_manual(values = c("True coef." = 8))
+```
+
+
+### Baseline hazard estimation 
+
+```{r}
+# comparison of estimated baseline hazard and true baseline hazard 
+# baseline hazard for non-terminal event 
+bs_hazard_1 <- data.frame(param = rep(paste0("alpha1 = ", alpha1_true, 
+                                            ", kappa1 = ", kappa1_true %>% round(2)), 
+                                      length(tseq_pred)), 
+                          type = "h1", 
+                          time = tseq_pred, 
+                          bs_hazard = dweibull(x = tseq_pred, 
+                                               shape = alpha1_true, 
+                                               scale = exp(-log(kappa1_true) / alpha1_true)),
+                          bs_cumhazard = pweibull(q = tseq_pred, 
+                                               shape = alpha1_true, 
+                                               scale = exp(-log(kappa1_true) / alpha1_true)))
+
+
+# baseline hazard for terminal event 
+bs_hazard_2 <- data.frame(param = rep(paste0("alpha2 = ", alpha2_true, 
+                                            ", kappa2 = ", kappa2_true %>% round(2)), 
+                                      length(tseq_pred)), 
+                          type = "h2", 
+                          time = tseq_pred, 
+                          bs_hazard = dweibull(x = tseq_pred, 
+                                               shape = alpha2_true, 
+                                               scale = exp(-log(kappa2_true) / alpha2_true)), 
+                          bs_cumhazard = pweibull(q = tseq_pred, 
+                                               shape = alpha2_true, 
+                                               scale = exp(-log(kappa2_true) / alpha2_true)))
+
+# conditional baseline hazard 
+bs_hazard_3 <- data.frame(param = rep(paste0("alpha3 = ", alpha3_true, 
+                                            ", kappa3 = ", kappa3_true %>% round(2)), 
+                                      length(tseq_pred)), 
+                          type = "h3", 
+                          time = tseq_pred, 
+                          bs_hazard = dweibull(x = tseq_pred, 
+                                               shape = alpha3_true, 
+                                               scale = exp(-log(kappa3_true) / alpha3_true)), 
+                          bs_cumhazard = pweibull(q = tseq_pred, 
+                                               shape = alpha3_true, 
+                                               scale = exp(-log(kappa3_true) / alpha3_true)))
+
+true_bs_hazards <- rbind(bs_hazard_1, 
+                         bs_hazard_2,
+                         bs_hazard_3)
+
+
+pw_coef_est <- summary(SFID_no_t1cat)$h0_long %>% 
+  as.data.frame() %>% 
+  mutate(coef = rownames(summary(SFID_no_t1cat)$h0_long))
+
+# plot baseline hazard 
+pw_coef_knots <- summary(SFID_no_t1cat)$knots_mat %>% 
+  as.data.frame() %>% 
+  gather(key = "type", 
+         value = "time") %>% 
+  arrange(type, time)
+
+pw_baseline <- cbind(pw_coef_est, 
+                     pw_coef_knots) %>% 
+  group_by(type) %>% 
+  mutate(time_b = c(lead(time) %>% na.omit, 100), 
+         beta_b = lag(beta))
+
+ggplot(data = pw_baseline) +
+  geom_point(mapping = aes(x = time, 
+                           y = beta %>% exp(), 
+                           color = type)) +
+  geom_segment(mapping = aes(x = time, xend = time_b,
+                             y = beta %>% exp(), 
+                             yend = beta %>% exp(), 
+                             color = type)) +
+  geom_segment(mapping = aes(x = time, xend = time,
+                           y = beta %>% exp(), 
+                           yend = beta_b %>% exp(),
+                           color = type),
+             linetype = "dotted") +
+  geom_line(data = true_bs_hazards,
+            aes(x = time, 
+                y = bs_hazard, 
+                color = type)) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(y = "baseline hazard function", 
+       color = "")
+
+
+
+```
+
+
+
+## Risk profiles for validation data set 
+
+```{r, echo=T,message=F,warning=F,results='show'}
+# n = 1000 for validation data set 
+valX <- valDat %>% 
+  dplyr::select(x1, x2, x3) %>% 
+  as.matrix()
+
+
+ValPred <- 
+  SemiCompRisksFreq:::pred_risk_ID(tseq = tseq_pred,
+                                   para = SFID_no_t1cat$estimate,
+                                   
+                                   x1new = valX, 
+                                   x2new = valX, 
+                                   x3new = valX,
+                                   
+                                   frailty = SFID_no_t1cat$frailty, 
+                                   model = SFID_no_t1cat$model,
+                                   nP0 = SFID_no_t1cat$nP0, 
+                                   nP = SFID_no_t1cat$nP,
+                                   p3tv = 0, 
+                                   h3tv_basis_func = h3_b_fun, 
+                                   hazard = SFID_no_t1cat$hazard,
+                                   knots_list = SFID_no_t1cat$knots_list,
+                                   n_quad = SFID_no_t1cat$n_quad, 
+                                   quad_method = SFID_no_t1cat$quad_method,
+                                   Finv = NULL, 
+                                   alpha = 0.05)
+
+```
+
+
+```{r, echo=T,message=F,warning=F,results='show'}
+trunc_time <- 100
+g_list <- list()
+j <- 1 
+
+for (i in c(1, 10, 300, 500, 700, 1000)) {
+  
+  g <- plot_risk_profile(tseq_pred = tseq_pred, 
+                         ValPred = ValPred, 
+                         i = i, 
+                         t_end = trunc_time)
+  
+  g_list[[j]] <- g 
+  j <- j + 1
+  
+}
+
+ggarrange(plotlist = g_list, 
+          nrow = 2, ncol = 3, 
+          common.legend = TRUE,
+          legend = "bottom")
+
+```
+
+
+## Restricted Mean Time Lost (RMTL)
+
+Truncation time is 100 [years]. 
+
+```{r, echo=F,message=F,warning=F,results='hide'}
+# integrate risk profile 
+# Monte Carlo integration based on input time sequence 
+# truncation time 100
+valDat$RMTL_nonterm_only <- as.vector(c(1, diff(ValPred$tseq)) %*% ValPred$p_nonterm_only)
+valDat$RMTL_term_only <- as.vector(c(1, diff(ValPred$tseq)) %*% ValPred$p_term_only)
+valDat$RMTL_both <- as.vector(c(1, diff(ValPred$tseq)) %*% ValPred$p_both)
+valDat$RMTL_neither <- as.vector(c(1, diff(ValPred$tseq)) %*% ValPred$p_neither)
+
+# compute true time lost in unhealthy state or dead based on some truncation time 
+
+valDat <- valDat %>% 
+  mutate(lost_time1 = ifelse(event1 == 1, 
+                             trunc_time - time1, 
+                             0), 
+         lost_time2 = ifelse(event2 == 1, 
+                             trunc_time - time2, 
+                             0)) %>% 
+  mutate(d_nonterm = case_when(event1 == 1 & event2 == 0 ~ lost_time1 - RMTL_nonterm_only, 
+                               event1 == 1 & event2 == 1 ~ lost_time1 - RMTL_both - RMTL_nonterm_only, 
+                               .default = 0),
+         d_nonterm_term = ifelse(event1 == 0 & event2 == 1, 
+                                 lost_time2 - RMTL_term_only, 
+                                 0),
+         d_term = ifelse(event1 == 1 & event2 == 1,
+                         lost_time2 - RMTL_both, 
+                         0)) %>% 
+  mutate(delta1 = event1, 
+         delta2 = ifelse(event1 == 0 & event2 == 1, 1, 0), 
+         delta12 = ifelse(event1 == 1 & event2 == 1, 1, 0))
+
+```
+
+
+```{r, echo=F,message=F,warning=F,results='show', out.width = '1000px', dpi=300}
+j <- 1 
+for (i in c(1, 10, 300, 500, 700, 1000)) {
+  valDat_i <- valDat[i, ]
+  
+  label <- paste0("RMTL NT only = ", valDat_i$RMTL_nonterm_only %>% round(2), " \n ", 
+                  "RMTL T only = ", valDat_i$RMTL_term_only %>% round(2), " \n ", 
+                  "RMTL NT + T = ", valDat_i$RMTL_both %>% round(2)
+                  # , "\n", "\n", 
+                  # "diff NT = ", valDat_i$d_nonterm %>% round(2), "\n", 
+                  # "diff T = ", valDat_i$d_term %>% round(2), "\n", 
+                  # "diff NT + T = ", valDat_i$d_nonterm_term %>% round(2)
+                  )
+  
+  g <- g_list[[j]] +
+    labs(caption = label)
+  
+  g_list[[j]] <- g
+  j <- j + 1
+}
+
+
+ggarrange(plotlist = g_list, 
+          nrow = 2, ncol = 3, 
+          common.legend = TRUE,
+          legend = "bottom")
+
+ggsave("Figures/RMTL_plots.pdf", 
+       width = 25, height = 16, unit = "cm")
+
+```
+
+
+```{r}
+# one for F31 example 
+valDat_one <- valDat[100, ]
+
+valDat_one$RMTL_neither
+  
+label <- paste0("RMTL NT only = ", valDat_one$RMTL_nonterm_only %>% round(2), " \n ", 
+                  "RMTL T only = ", valDat_one$RMTL_term_only %>% round(2), " \n ", 
+                  "RMTL NT + T = ", valDat_one$RMTL_both %>% round(2)
+                  # , "\n", "\n", 
+                  # "diff NT = ", valDat_i$d_nonterm %>% round(2), "\n", 
+                  # "diff T = ", valDat_i$d_term %>% round(2), "\n", 
+                  # "diff NT + T = ", valDat_i$d_nonterm_term %>% round(2)
+                  )
+
+g <- plot_risk_profile_grant(tseq_pred = tseq_pred, 
+                         ValPred = ValPred, 
+                         i = 100, 
+                         t_end = trunc_time) +
+    # labs(caption = label) +
+  labs(color = "", fill = "", title = "", 
+       x = "Time [days]") +
+  theme(legend.position = "bottom") 
+
+g
+
+ggsave("Figures/RMTL_grant.pdf", 
+       width = 15, height = 15, unit = "cm")
+
+label 
+```
+
+
+## Restricted mean time lost over time in each state
+According to Mozumber 2021. 
+
+Compute the RMTL over time for each patient and average over prediction to obtain mean predicted RMTL for each state over time. 
+
+
+The population averaged version follows below. 
+
+```{r, echo=F,message=F,warning=F,results='show', out.width = '1000px', dpi=300}
+RMTL <- data.frame(time = tseq_pred, 
+                   RMTL_NT = c(0, rep(NA, length(tseq_pred) - 1)), 
+                   RMTL_T = c(0, rep(NA, length(tseq_pred)- 1)), 
+                   RMTL_NT_T = c(0, rep(NA, length(tseq_pred) - 1)), 
+                   RMTL_HA = c(0, rep(NA, length(tseq_pred) - 1))
+                   )
+
+for (t in tseq_pred[-1]) {
+  
+  tseq_temp <- ValPred$tseq[ValPred$tseq <= t]
+  P_nonterm_temp <- ValPred$p_nonterm_only[seq(1, length(tseq_temp)), ]
+  P_term_temp <- ValPred$p_term_only[seq(1, length(tseq_temp)), ]
+  P_both_temp <- ValPred$p_both[seq(1, length(tseq_temp)), ]
+  P_neither_temp <- ValPred$p_neither[seq(1, length(tseq_temp)), ]
+  
+  RMTL[t + 1, ]$RMTL_NT <- as.vector(c(0.5, diff(tseq_temp)[-1], 0.5) %*% 
+                                       P_nonterm_temp) %>% 
+    mean()
+  
+  RMTL[t + 1, ]$RMTL_T <- as.vector(c(0.5, diff(tseq_temp)[-1], 0.5) %*% 
+                                      P_term_temp) %>% 
+    mean()
+  
+  RMTL[t + 1, ]$RMTL_NT_T <- as.vector(c(0.5, diff(tseq_temp)[-1], 0.5) %*% 
+                                         P_both_temp) %>% 
+    mean()
+  
+  RMTL[t + 1, ]$RMTL_HA <- as.vector(c(0.5, diff(tseq_temp)[-1], 0.5) %*% 
+                                       P_neither_temp) %>% 
+    mean()
+}
+
+RMTL_df <- RMTL %>% 
+  gather(key = "name", 
+         value = "RMTL", 
+         -time)
+
+# plot RMTL over time 
+ggplot(data = RMTL_df, 
+       aes(x = time, 
+           y = RMTL,
+           color = name, 
+           fill = name)) +
+  geom_area(position = "stack") +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  scale_color_manual(values = four_color_cb) +
+  scale_fill_manual(values = four_color_cb) + 
+  labs(color = "", fill = "", 
+       x = "Truncation time", 
+       title = "Average over populations")
+
+```
+
+On a patient specific level, 
+
+```{r}
+g_list <- list()
+j <- 1 
+
+for (i in c(1, 10, 300, 500, 700, 1000)) {
+  
+  g <- plot_RMTL_profile(tseq_pred = tseq_pred, 
+                         ValPred = ValPred, 
+                         i = i)
+  
+  g_list[[j]] <- g 
+  j <- j + 1
+  
+}
+
+ggarrange(plotlist = g_list, 
+          nrow = 2, ncol = 3, 
+          common.legend = TRUE,
+          legend = "bottom")
+```
+
+
+
+
+## Scatterplots for predicted and observed RMTL due to non-terminal event and / or death 
+
+Scatterplots of observed and predicted time-to-event for all three states. For non-observed state, have marginal distribution. 
+
+### (1) Time to death 
+```{r, echo=F,message=F,warning=F,results='show', out.width = '1000px', dpi=300}
+# scatter plot for terminal only where terminal event truly happened 
+g1 <- ggplot(data = valDat %>%  
+               filter(event2 == 1), 
+             aes(x = RMTL_term_only, 
+                 y = lost_time2, 
+                 color = event1 %>% factor(levels = c(0, 1), 
+                                           label = c("No", "Yes")))) +
+  geom_point(alpha = 0.8) +
+  geom_abline(aes(intercept = 0, slope = 1),
+              color = "grey", 
+              linetype = "dashed") +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(x = "Predicted RMTL (terminal only)", 
+       y = "Observed RMTL", 
+       title = "Death", 
+       color = "Non-terminal event occurred?") +
+  scale_color_manual(values = c("No" = "#DC267F", 
+                                "Yes" = "#785EF0"))
+
+g2 <- ggplot(data = valDat %>%  
+               filter(event2 == 1), 
+             aes(x = RMTL_both, 
+                 y = lost_time2, 
+                 color = event1 %>% factor(levels = c(0, 1), 
+                                           label = c("No", "Yes")))) +
+  geom_point(alpha = 0.8) +
+  geom_abline(aes(intercept = 0, slope = 1),
+              color = "grey", 
+              linetype = "dashed") +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(x = "Predicted RMTL (both)", 
+       y = "Observed RMTL", 
+       title = "", 
+       color = "Non-terminal event occurred?") +
+  scale_color_manual(values = c("No" = "#DC267F", 
+                                "Yes" = "#785EF0"))
+
+# marginal density plot for predicted time lost due to death 
+g3 <- ggplot() +
+  geom_density(data = valDat %>% 
+                 filter(event2 == 0 & event1 == 0),
+       aes(x = RMTL_term_only, 
+           color = "No")) +
+  geom_density(data = valDat %>% 
+                 filter(event2 == 0 & event1 == 1),
+       aes(x = RMTL_both, 
+           color = "Yes (conditional)")) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(x = "Predicted RMTL (terminal only / both)", 
+       title = "Adm. censoring", 
+       caption = "No event ever happened", 
+       color = "Non-terminal event happened?") +
+  scale_color_manual(values = c("No" = "#DC267F", 
+                                "Yes (conditional)" = "#785EF0")) 
+
+g4 <- ggplot() +
+  geom_density(data = valDat %>% 
+                 filter(event2 == 0 & event1 == 1),
+       aes(x = RMTL_term_only, 
+           color = "No")) +
+  geom_density(data = valDat %>% 
+                 filter(event2 == 0 & event1 == 1),
+       aes(x = RMTL_both, 
+           color = "Yes (conditional)")) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(x = "Predicted RMTL (terminal only / both)", 
+       title = "Adm. censoring (conditional)", 
+       caption = "Non-terminal event never happened", 
+       color = "Non-terminal event happened?") +
+  scale_color_manual(values = c("No" = "#DC267F", 
+                                "Yes (conditional)" = "#785EF0")) 
+
+
+g12 <- ggarrange(g1, g2, 
+                 nrow = 1, ncol = 2, 
+                 common.legend = TRUE, 
+                 legend = "bottom")
+
+g34 <- ggarrange(g3, g4, 
+                 nrow = 1, ncol = 2, 
+                 common.legend = TRUE, 
+                 legend = "bottom")
+
+cowplot::plot_grid(g12, g34, 
+                   nrow = 2, rel_heights = c(7, 5))
+
+
+
+```
+
+
+### (2) Time to non-terminal event
+```{r, echo=F,message=F,warning=F,results='show', out.width = '1000px', dpi=300}
+# scatter plot for terminal only where terminal event truly happened 
+g1 <- ggplot(data = valDat %>%  
+               filter(event1 == 1), 
+             aes(x = RMTL_nonterm_only, 
+                 y = lost_time1, 
+                 color = event2 %>% factor(levels = c(0, 1), 
+                                           label = c("No", "Yes")))) +
+  geom_point(alpha = 0.8) +
+  geom_abline(aes(intercept = 0, slope = 1),
+              color = "grey", 
+              linetype = "dashed") +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(x = "Predicted RMTL (non-terminal only)", 
+       y = "Observed RMTL", 
+       color = "Terminal event occurred?", 
+       title = "Non-terminal event") +
+  scale_color_manual(values = c("No" = "#648FFF", 
+                                "Yes" = "#785EF0"))
+
+g2 <- ggplot(data = valDat %>%  
+               filter(event1 == 1), 
+             aes(x = RMTL_both, 
+                 y = lost_time1, 
+                 color = event2 %>% factor(levels = c(0, 1), 
+                                           label = c("No", "Yes")))) +
+  geom_point(alpha = 0.8) +
+  geom_abline(aes(intercept = 0, slope = 1),
+              color = "grey", 
+              linetype = "dashed") +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(x = "Predicted RMTL (both)", 
+       y = "Observed RMTL", 
+       color = "Terminal event occurred?", 
+       title = "") +
+  scale_color_manual(values = c("No" = "#648FFF", 
+                                "Yes" = "#785EF0"))
+
+# marginal density plot for patients who experience neither outcome by the end
+g3 <- ggplot() +
+  geom_density(data = valDat %>% 
+                 filter(event1 == 0 & event2 == 0),
+       aes(x = RMTL_nonterm_only, 
+           color = "No")) +
+  geom_density(data = valDat %>% 
+                 filter(event1 == 0 & event2 == 0),
+       aes(x = RMTL_both, 
+           color = "Yes (conditional)")) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(x = "Predicted RMTL (non-terminal only / both)", 
+       title = "Adm. censoring", 
+       caption = "Neither event happened", 
+       color = "Terminal event happened?") +
+  scale_color_manual(values = c("No" = "#648FFF", 
+                                "Yes (conditional)" = "#785EF0")) 
+
+g4 <- ggplot() +
+  geom_density(data = valDat %>% 
+                 filter(event1 == 0 & event2 == 1),
+       aes(x = RMTL_nonterm_only, 
+           color = "No")) +
+  geom_density(data = valDat %>% 
+                 filter(event1 == 0 & event2 == 1),
+       aes(x = RMTL_both, 
+           color = "Yes (conditional)")) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(x = "Predicted RMTL (non-terminal only / both)", 
+       title = "Truncation by death" , 
+       caption = "Terminal event happened earlier", 
+       color = "Terminal event happened?") +
+  scale_color_manual(values = c("No" = "#648FFF", 
+                                "Yes (conditional)" = "#785EF0")) 
+
+
+g12 <- ggarrange(g1, g2, 
+                 nrow = 1, ncol = 2, 
+                 common.legend = TRUE, 
+                 legend = "bottom")
+
+g34 <- ggarrange(g3, g4, 
+                 nrow = 1, ncol = 2, 
+                 common.legend = TRUE, 
+                 legend = "bottom")
+
+cowplot::plot_grid(g12, g34, 
+                   nrow = 2, 
+                   rel_heights = c(7, 5))
+
+
+```
+
+## Population-averaged Cumulative Incidence Curve based on Illness-Death model and alternative estimation methods  
+
+### Competing risk framework
+
+Naively, mortality and the non-terminal endpoint could be analyzed as competing endpoints. 
+The Aalen-Johansen estimator estimates nonparametric Cumulative Incidence Curves for mortality and the non-terminal endpoint. 
+Alternatively, we could estimate a competing risk Cox regression.  
+The survival probability for the composite endpoint, describing the first occurrence of either death or the non-terminal event, is estimated as a Kaplan Meier survival curve. 
+
+The Aalen-Johansen CIC estimate describes (1) the cumulative probability of dying (D) before experiencing the non-terminal event and (2) the cumulative probability of experiencing the non-terminal (NT) event before death.
+
+For some $t \in [0, \tau]$, 
+\begin{align}
+CIC_D(t) & = P(T_D \leq t; T_{NT} > T_D) \\ 
+& = P(T_D \leq t; \delta_{NT} == 0)  \\
+\\
+CIC_{NT}(t) & = P(T_{NT} \leq t; T_{D} > T_{NT})
+\end{align}
+
+Thinking about the CICs, we can further express the CIC for the non-terminal endpoint in terms of mortality happening subsequentially or not, 
+\begin{align}
+CIC_{NT}(t) & = P(T_{NT} \leq t; T_{D} > T_{NT}) \\
+& = P(T_{NT} \leq t; T_D \leq t; T_{D} > T_{NT}) + P(T_{NT} \leq t; T_D > t; T_{D} > T_{NT})
+\end{align}
+
+
+The shared-frailty illness death model computes the marginal state probabilities, cumulative up to a certain time point.
+Marginal refers to the marginalization over the frailty distribution. 
+Patients can transition out of state probabilities, as they move from Healthy to Ill and / or Dead over time. 
+For some $t \in [0, \tau]$, 
+\begin{align}
+P(\text{Terminal only before/at } t) & = P(T_D \leq t; T_{NT} > T_D; \delta_{NT} = 0) \\
+& =  P(T_D \leq t; T_{NT} > T_D) \\
+& = CIC_D(t) \\
+\\
+P(\text{Non-terminal only before/at} t) & = P(T_{NT} \leq t; T_{D} > T_{NT}; \delta_D = 0) \\
+P(\text{Both events happening at } t) & = P(T_{NT} \leq t; T_D \leq t; T_{D} > T_{NT}) \\
+\end{align}
+
+The CIC for mortality is equivalent to the mortality only probability, estimated by the illness death model, as any death following after the occurrence of the non-terminal event is omitted in the competing risk framework.  
+
+The CIC for the non-terminal event is the sum of the non-terminal only and terminal / non-terminal cumulative state probability. 
+\begin{align}
+CIC_{NT}(t) & = P(\text{Non-terminal only before/at } t) + P(\text{Both events happening before/at } t)
+\end{align}
+
+Alternatively, the CIC can be estimated based on parametric competing risk models, accounting for the same covariates as the Illness-Death model, based on (1) Fine and Gray subdistribution hazard function and (2) cause-specific Cox proportional hazard functions. 
+
+
+```{r, echo=F,message=F,warning=F,results='show'}
+# construct competing risk columns 
+trainDat <- trainDat %>% 
+  mutate(status_comp = case_when(time1 < time2 & event1 == 1 ~ 1, 
+                                 time2 <= time1 & event2 == 1 & event1 == 0 ~ 2,
+                                 .default = 0) %>% 
+           as.factor(), 
+         status_comp_T = case_when(time1 < time2 & event1 == 1 ~ 2, 
+                                 time2 <= time1 & event2 == 1 & event1 == 0 ~ 1,
+                                 .default = 0) %>% 
+           as.factor()
+         ) %>% 
+  group_by(id) %>% 
+  mutate(time_comp = min(time1, time2)) %>% 
+  ungroup()
+
+valDat <- valDat %>% 
+  mutate(status_comp = case_when(time1 < time2 & event1 == 1 ~ 1, 
+                                 time2 <= time1 & event2 == 1 & event1 == 0 ~ 2,
+                                 .default = 0) %>% 
+           as.factor(), 
+         status_comp_T = case_when(time1 < time2 & event1 == 1 ~ 2, 
+                                 time2 <= time1 & event2 == 1 & event1 == 0 ~ 1,
+                                 .default = 0) %>% 
+           as.factor()
+         ) %>% 
+  group_by(id) %>% 
+  mutate(time_comp = min(time1, time2)) %>% 
+  ungroup()
+# check if correctly constructed 
+table(trainDat$status_comp)
+table(trainDat$status_comp_T)
+table(trainDat$event1, trainDat$event2)
+
+# subdistribution based CIC estimation 
+CIC_G <- cuminc(trainDat$time_comp, 
+                trainDat$status_comp)
+
+CIF_G_emp_NT <- data.frame(time = CIC_G$`1 1`$time, 
+                           Prob = CIC_G$`1 1`$est, 
+                           name = "Non-Terminal")
+
+CIF_G_emp_T <- data.frame(time = CIC_G$`1 2`$time, 
+                          Prob = CIC_G$`1 2`$est, 
+                          name = "Terminal")
+
+CIF_G_emp_df <- rbind(CIF_G_emp_NT,
+                      CIF_G_emp_T)
+
+
+# competing risk Fine & Gray analysis 
+FG_comp_NT_trainDat <- finegray(Surv(time_comp, status_comp) ~ ., 
+                    data = trainDat)
+
+FG_comp_NT <- coxph(Surv(fgstart, fgstop, fgstatus) ~ x1 + x2 + x3,
+                     weight = fgwt, 
+               data = FG_comp_NT_trainDat) %>% 
+  survfit(newdata = valDat)
+
+FG_comp_T_trainDat <- finegray(Surv(time_comp, status_comp_T) ~ ., 
+                    data = trainDat)
+
+FG_comp_T <- coxph(Surv(fgstart, fgstop, fgstatus) ~ x1 + x2 + x3,
+                     weight = fgwt, 
+               data = FG_comp_T_trainDat) %>% 
+  survfit(newdata = valDat)
+
+FG_comp_NT_df <- data.frame(time = FG_comp_NT$time, 
+                            Prob = (1 - FG_comp_NT$surv) %>% 
+                              apply(MARGIN = 1, mean), 
+                            name = "Non-Terminal")
+
+FG_comp_T_df <- data.frame(time = FG_comp_T$time, 
+                            Prob = (1 - FG_comp_T$surv) %>% 
+                              apply(MARGIN = 1, mean), 
+                            name = "Terminal")
+
+FG_comp_df <- rbind(FG_comp_NT_df, 
+                    FG_comp_T_df)
+
+# cause specific competing risk Cox regression 
+
+# population averaged over all patients in validation data set 
+# estimation based on Illness Death model 
+CIF_pred_df <- rbind(data.frame(time = ValPred$tseq,
+                                Prob = ValPred$p_nonterm_marg %>% 
+                                  apply(MARGIN = 1, mean),
+                                name = "Non-Terminal"), 
+                     data.frame(time = ValPred$tseq,
+                                Prob = ValPred$p_term_only_marg %>% 
+                                  apply(MARGIN = 1, mean),
+                                name = "Terminal"))
+
+# Aalen-Johansen CIC for non-terminal and terminal event 
+cif_comp <- cmprsk::cuminc(valDat$time_comp, 
+                      valDat$status_comp)
+
+CIF_emp_NT <- data.frame(time = cif_comp$`1 1`$time, 
+                        Prob = cif_comp$`1 1`$est, 
+                        name = "Non-Terminal")
+
+CIF_emp_T <- data.frame(time = cif_comp$`1 2`$time, 
+                        Prob = cif_comp$`1 2`$est, 
+                        name = "Terminal")
+
+CIF_emp_df <- rbind(CIF_emp_NT, 
+                    CIF_emp_T)
+
+```
+
+
+```{r, echo=F,message=F,warning=F,results='show', out.width = '1000px', dpi=300}
+ggplot(data = CIF_pred_df, 
+       aes(x = time, 
+           y = Prob, 
+           linetype = name, 
+           color = "Illness-Death pred. \n(Cov. adj.)")) +
+  geom_line() +
+  geom_line(data = CIF_emp_df, 
+            aes(x = time, 
+                y = Prob, 
+                linetype = name, 
+            color = "AJ CIC est. \n(Cov. unadj.)")) +
+  geom_line(data = CIF_G_emp_df, 
+            aes(x = time, 
+                y = Prob, 
+                linetype = name, 
+            color = "Subd. CIC est. \n(Cov. unadj.)")) +
+  geom_line(data = FG_comp_df,
+            aes(x = time,
+                y = Prob,
+                linetype = name,
+                color = "Fine & Gray subd. CIC est. \n(Cov. adj.)")) +
+  theme_bw() +
+  # theme(legend.position = "bottom") +
+  labs(y = "Cumulative Incidence Curve", 
+       x = "Time", 
+       color = "", 
+       linetype = "", 
+       caption = "Population average")
+
+```
+
+### Univariate perspective on death  
+The competing risk framework omits any death happening post non-terminal event.
+If we only consider death, disregarding the non-terminal event, we might end up with observing more deaths.
+
+Consider the marginal probability of death, which contains death without and with having experienced the non-terminal event. 
+It is the sum of terminal event only and the conditional probability of experiencing the terminal event post non-terminal event at some time point prior to $t$. 
+We consider the marginal probabilities, marginalized over the frailty distribution, by inserting (according to the marginalized distribution derived above somewhere), $\gamma_i = 1$. 
+The derivation below shows the marginal probability of mortality equals the sum of the probability of terminal only and both events happening. 
+\begin{align}
+P(T_D \leq t | x_i) & = P(T_D \leq t, \delta_{NT} = 0 | x_i) + P(T_D \leq t, \delta_{NT} = 1 | x_i) \\ 
+& = CIC_D(t | x_i) + \int_{0}^t \int_{0}^u \lambda_1(s | x_i) \cdot \exp(-\Lambda_1(s | x_i) - \Lambda_2(s | x_i)) \cdot \lambda_3(u | x_i) \exp(-\Lambda_3(u | x_i, s)) \partial s \partial u \\
+& = CIC_D(t | x_i) + P(T_D \leq t, T_{NT} \leq t | x_i)
+\end{align}
+
+We estimate the marginal mortality probability based on a Cox proportional hazard model and nonparametrically via Kaplan-Meier.  
+
+
+```{r, echo=F,message=F,warning=F,results='show', out.width = '1000px', dpi=300}
+# Cox proportional hazard 
+CoxPH_death_EP <- coxph(Surv(trainDat$time2, trainDat$event2) ~ x1 + x2 + x3,
+                       trainDat) %>% 
+  survfit(newdata = valDat)
+
+CoxPH_death_EP_df <- data.frame(time = CoxPH_death_EP$time, 
+                                Prob = (1 - CoxPH_death_EP$surv) %>% 
+                                  apply(MARGIN = 1, mean), 
+                                name = "Terminal (marg.)")
+
+# Cox proportional hazard in competing risk framework 
+trainDat <- trainDat %>% 
+  mutate(status_comp_death = ifelse(event1 == 1 & event2 == 1, 0, event2))
+
+table(trainDat$event1, trainDat$event2)
+trainDat$status_comp_death %>% table()
+
+CoxPH_death_CP <- coxph(Surv(trainDat$time2, trainDat$status_comp_death) ~ x1 + x2 + x3,
+                       trainDat) %>% 
+  survfit(newdata = valDat)
+
+CoxPH_death_CP_df <- data.frame(time = CoxPH_death_CP$time, 
+                                Prob = (1 - CoxPH_death_CP$surv) %>% 
+                                  apply(MARGIN = 1, mean), 
+                                name = "Terminal (only)")
+
+# Kaplan Meier 
+KM_death_EP <- coxph(Surv(trainDat$time2, trainDat$event2) ~ 1) %>% 
+  survfit()
+
+KM_death_EP_df <- data.frame(time = KM_death_EP$time, 
+                             Prob = (1 - KM_death_EP$surv), 
+                             name = "Terminal (marg.)")
+
+# Illness-Death model based marginal estimation 
+CIF_death <- rbind(data.frame(time = ValPred$tseq,
+                                Prob = (ValPred$p_both + ValPred$p_term_only_marg) %>% 
+                                  apply(MARGIN = 1, mean),
+                                name = "Terminal (marg.)"), 
+                     data.frame(time = ValPred$tseq,
+                                Prob = ValPred$p_term_only_marg %>% 
+                                  apply(MARGIN = 1, mean),
+                                name = "Terminal (only)"))
+
+
+ggplot(data = CIF_death, 
+       aes(x = time, 
+           y = Prob, 
+           linetype = name, 
+           color = "Illness-Death model pred. \n(Cov. adj.)")) +
+  geom_line() +
+  geom_line(data = KM_death_EP_df, 
+            aes(x = time, 
+                y = Prob, 
+                linetype = name, 
+            color = "KM est. \n(Cov. unadj.)")) +
+  geom_line(data = CoxPH_death_EP_df, 
+            aes(x = time, 
+                y = Prob, 
+                linetype = name, 
+            color = "Marg. Cox PH pred. \n(Cov. adj.)")) +
+    geom_line(data = CoxPH_death_CP_df, 
+            aes(x = time, 
+                y = Prob, 
+                linetype = name, 
+            color = "Comp. risk Cox PH pred. \n(Cov. adj.)")) +
+  theme_bw() +
+  # theme(legend.position = "bottom") +
+  labs(y = "Cumulative Incidence Curve", 
+       x = "Time", 
+       color = "", 
+       linetype = "", 
+       caption = "Population average")
+
+
+
+```
+
+## Classification rates 
+### Correct classification rate
+Consider all 4 states equal and compute the correct classification rate at each time point that is predicted. 
+
+The overall correct classification rate is determined as the sum over all 4 states. 
+The states can be acknowledged to have different clinical relevance by introducing weights. 
+
+The correct classification rate depends on prevalence, as it is the prevalence weighted average of state-specific classification rate (Li 2008). 
+We compute the total correct classification rate marginally, by binarizing. 
+
+```{r, echo=F,message=F,warning=F,results='show', out.width = '1000px', dpi=300}
+CCR <- data.frame(CC = rep(NA, length(tseq_pred)), 
+                  CCR = rep(NA, length(tseq_pred)), 
+                  
+                  CC_NT = rep(NA, length(tseq_pred)), 
+                  CC_T = rep(NA, length(tseq_pred)), 
+                  CC_NT_T = rep(NA, length(tseq_pred)), 
+                  CC_HA = rep(NA, length(tseq_pred)), 
+                  
+                  CCR_NT = rep(NA, length(tseq_pred)), 
+                  CCR_T = rep(NA, length(tseq_pred)), 
+                  CCR_NT_T = rep(NA, length(tseq_pred)), 
+                  CCR_HA = rep(NA, length(tseq_pred)))
+
+for (t in tseq_pred) {
+  
+  # which class does patient currently belong too observed 
+  valDat_temp <- valDat %>% 
+    mutate(current_class = case_when(time1 > t & time2 > t ~ "Healthy and Alive", 
+                                     time1 <= t & event1 == 1 & time2 > t ~ "Non-Terminal", 
+                                     time1 <= t & event1 == 1 & 
+                                       time2 <= t & event2 == 1 ~ "Both", 
+                                     time2 <= t & event1 == 0 & event2 == 1 ~ "Terminal", 
+                                     .default = "Censored"), 
+           PP_nonterm = ValPred$p_nonterm_only[t + 1, ], 
+           PP_term = ValPred$p_term_only[t + 1, ], 
+           PP_both = ValPred$p_both[t + 1, ], 
+           PP_ha = ValPred$p_neither[t + 1, ]
+           ) %>% 
+    group_by(id) %>% 
+    mutate(PP_max = max(PP_nonterm, PP_term, PP_both, PP_ha)) %>% 
+    mutate(pred_class = case_when(PP_nonterm == PP_max ~ "Non-Terminal", 
+                                  PP_term == PP_max ~ "Terminal", 
+                                  PP_both == PP_max ~ "Both", 
+                                  PP_ha == PP_max ~ "Healthy and Alive", 
+                                  .default = NA)) %>% 
+    ungroup()
+  
+  
+  valDat_temp$pred_class %>% table(useNA = "always")
+  valDat_temp$current_class %>% table(useNA = "always")
+  
+  CCR[t+1, ] <- valDat_temp %>% 
+    summarize(CC = sum(pred_class == current_class), 
+              CCR = CC / n(), 
+              
+              # count of correct classification 
+              CC_NT = sum(pred_class == current_class & current_class == "Non-Terminal"),
+              CC_T = sum(pred_class == current_class & current_class == "Terminal"),
+              CC_NT_T = sum(pred_class == current_class & current_class == "Both"), 
+              CC_HA = sum(pred_class == current_class & current_class == "Healthy and Alive"), 
+              
+              # rate of correct classification 
+              CCR_NT = CC_NT / max(1, sum(pred_class == "Non-Terminal")),
+              CCR_T = CC_T / max(1, sum(pred_class == "Terminal")),
+              CCR_NT_T = CC_NT_T / max(1, sum(pred_class == "Both")), 
+              CCR_HA = CC_HA / max(1, sum(pred_class == "Healthy and Alive"))
+    )
+}
+
+CCR$time <- tseq_pred
+
+ggplot(data = CCR, 
+       aes(x = time, 
+           y = CCR)) +
+  geom_line(aes(linetype = "Overall (across all states)")) +
+  geom_line(mapping = aes(y = CCR_NT,
+                           color = "Non-Terminal")) +
+  geom_line(mapping = aes(y = CCR_T,
+                           color = "Terminal")) +
+  geom_line(mapping = aes(y = CCR_NT_T,
+                           color = "Both")) +
+  geom_line(mapping = aes(y = CCR_HA,
+                           color = "Healthy and Alive")) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(color = "", 
+       linetype = "", 
+       y = "Correct Classification Rate (cond. on state)", 
+       x = "Time")
+
+
+```
+
+
+<!-- #### Time integrated  -->
+
+
+<!-- ### Missclassification rate  -->
+
+<!-- #### Over time  -->
+
+
+<!-- #### Time integrated  -->
+
+
+<!-- #### Weighted missclassification rate -->
+<!-- If a patient is dead, does it make a difference if they die with or without AD?  -->
+<!-- Hence, if a patient is classified as dead without AD but truly died with AD, we consider the patient only "half" incorrectly classified.  -->
+
+
+## Entropy (log loss) for multiclass predictions 
+
+Entropy is $E = -\sum_i \sum_{k = 1}^4 \delta_{k, i} \log(P_k(x_i))$. 
+As time progressed, the entropy increases, showing a decreasing prediction accuracy.  
+
+```{r, echo=F,message=F,warning=F,results='show', out.width = '1000px', dpi=300}
+# time to predict and assess accuracy 
+tseq_acc <- seq(5, 100, by = 5)
+
+entropy <- c()
+for (t in tseq_acc) {
+  
+  entropy_temp <- valDat %>%
+    mutate(state = case_when(time1 > t & time2 > t ~ 1, 
+                             time1 <= t & event1 == 1 & time2 > t ~ 2, 
+                             time1 <= t & event1 == 1 & 
+                               time2 <= t & event2 == 1 ~ 3, 
+                             time2 <= t & event1 == 0 & event2 == 1 ~ 4, 
+                             .default = 0), 
+           summand_nonterm = -log(ValPred$p_nonterm_only[t + 1, ]) * (state == 2) , 
+           summand_term = -log(ValPred$p_term_only[t + 1, ]) * (state == 4), 
+           summand_both = -log(ValPred$p_both[t + 1, ]) * (state == 3), 
+           summand_ha = -log(ValPred$p_neither[t + 1, ]) * (state == 1)) %>% 
+    summarize(entropy = sum(summand_nonterm + summand_term + summand_both + summand_ha))
+  
+  entropy <- c(entropy, entropy_temp$entropy)
+}
+
+ggplot(data = data.frame(time = tseq_acc, 
+                         entr = entropy), 
+       aes(x = time, 
+           y = entr)) +
+  geom_line() +
+  theme_bw() +
+  labs(x = "Time", 
+       y = "Entropy")
+```
+
+
+
+
+
+## ROC surface 
+
+Considering the univariate specificity and sensitivity for each state, for a three-dimensional tuple of thresholds, creates a three-dimensional ROC surface. 
+The volume under the manifold (HUM) or volume under the ROC surface (VUS) has been proposed as a joint assessment of prediction accuracy (see Lee). 
+
+It describes the probability of correct classification, according to some decision rule.
+Decision rules for multiple states must be correctly generalized from standard binary decision rules. 
+Multiple different definitions are available (Li 2008). 
+
+Depending on the decision rule, the UVS / HUM has a certain interpretation. 
+All three decision rules discussed in Li 2008 provide equivalent HUM interpretation. 
+It describes how likely class-probabilities follow certain sequence aligning with a (potentially arbitrary) sequence of classes.
+The probability to obtain the correct ordering / ranking based on a coin toss is $1 / M!$. 
+
+Inference on HUM can be performed based on U-statistic theory. 
+
+
+
+For now, the data is simulated without censoring.
+The outcome is known for every patient. 
+
+```{r, echo=F,message=F,warning=F,results='show', out.width = '1000px', dpi=300}
+sens_spec_list <- list()
+ROC_list <- list()
+
+j <- 1 
+for (t in c(10, 50, 90)) {
+  
+  valDat_temp <- valDat %>% 
+    mutate(PP_nonterm = ValPred$p_nonterm_only[t + 1, ], 
+           PP_term = ValPred$p_term_only[t + 1, ], 
+           PP_both = ValPred$p_both[t + 1, ], 
+           PP_ha = ValPred$p_neither[t + 1, ], 
+           
+           # indicator for each state 
+           delta_nonterm = as.numeric(time1 <= t & event1 == 1 & time2 > t), 
+           delta_term = as.numeric(time2 <= t & event1 == 0 & event2 == 1), 
+           delta_both = as.numeric(time1 <= t & event1 == 1 & time2 <= t & event2 == 1), 
+           delta_ha = as.numeric(time1 > t & time2 > t)
+           )
+  
+  ROC_nonterm <- roc(valDat_temp$delta_nonterm, 
+                    valDat_temp$PP_nonterm)
+  
+  ROC_term <- roc(valDat_temp$delta_term, 
+                    valDat_temp$PP_term)
+  
+  ROC_both <- roc(valDat_temp$delta_both, 
+                    valDat_temp$PP_both)
+  
+  ROC_neither <- roc(valDat_temp$delta_ha, 
+                    valDat_temp$PP_ha)
+  
+  ROC_list[[j]] <- data.frame(time = t, 
+                              AUC_nonterm = ROC_nonterm$auc, 
+                              AUC_term = ROC_term$auc, 
+                              AUC_both = ROC_both$auc, 
+                              AUC_neither = ROC_neither$auc)
+  
+  sens_spec_list[[j]] <- data.frame(time = t, 
+                              type = c(rep("Non-Terminal", length(ROC_nonterm$sensitivities)), 
+                                       rep("Terminal", length(ROC_term$sensitivities)), 
+                                       rep("Both", length(ROC_both$sensitivities)), 
+                                       rep("Healthy and Alive", length(ROC_neither$sensitivities))
+                                       ), 
+                              sens = c(ROC_nonterm$sensitivities, 
+                                       ROC_term$sensitivities, 
+                                       ROC_both$sensitivities, 
+                                       ROC_neither$sensitivities), 
+                              spec = c(ROC_nonterm$specificities,
+                                       ROC_term$specificities, 
+                                       ROC_both$specificities,
+                                       ROC_neither$specificities)
+                              ) 
+  
+  j <- j + 1
+}
+
+ROC_df <- list.rbind(ROC_list)
+sens_spec_df <- list.rbind(sens_spec_list)
+
+g1 <- ggplot(data = sens_spec_df %>% filter(time == 10), 
+       aes(y = sens, 
+           x = 1 - spec, 
+           color = type)) +
+  geom_line() +
+  facet_grid(~ type) +
+  theme_bw() +
+  labs(y = "Sensitivity", 
+       x = "1 - Specificity", 
+       color = "", 
+       title = "ROC at t=10") +
+  geom_abline(aes(intercept = 0, 
+                  slope = 1), 
+              linetype = "dashed", 
+              color = "grey")
+
+g2 <- ggplot(data = sens_spec_df %>% filter(time == 50), 
+       aes(y = sens, 
+           x = 1 - spec, 
+           color = type)) +
+  geom_line() +
+  facet_grid(~ type) +
+  theme_bw() +
+  labs(y = "Sensitivity", 
+       x = "1 - Specificity", 
+       color = "", 
+       title = "ROC at t=50") +
+  geom_abline(aes(intercept = 0, 
+                  slope = 1), 
+              linetype = "dashed", 
+              color = "grey")
+
+g3 <- ggplot(data = sens_spec_df %>% filter(time == 90), 
+       aes(y = sens, 
+           x = 1 - spec, 
+           color = type)) +
+  geom_line() +
+  facet_grid(~ type) +
+  theme_bw() +
+  labs(y = "Sensitivity", 
+       x = "1 - Specificity", 
+       color = "", 
+       title = "ROC at t=90") +
+  geom_abline(aes(intercept = 0, 
+                  slope = 1), 
+              linetype = "dashed", 
+              color = "grey")
+
+ggarrange(g1, g2, g3, 
+          nrow = 3, 
+          common.legend = TRUE, legend = "bottom")
+
+ROC_df %>% 
+  mutate(HUM = AUC_nonterm + AUC_term + AUC_both + AUC_neither)
+
+```
+
+
+
+
+## Multiclass Matthew correlation coefficient
+The Matthew correlation coefficient (MCC) measures the correlation between the predicted and observed probability for a binary classification. 
+It quantifies specificity and sensitivity, as well as precision (correct identification among ill patients) and the true negative probability among the healthy patients. 
+It has been argued to provide a more relevant impression of the quality of a decision rule as it takes its predictive accuracy into account. 
+
+
+
+```{r, echo=F,message=F,warning=F,results='show', out.width = '1000px', dpi=300}
+MCC_list <- list()
+
+j <- 1 
+for (t in c(10, 50, 90)) {
+  
+  valDat_temp <- valDat %>% 
+    mutate(current_class = case_when(time1 > t & time2 > t ~ 1, 
+                                     time1 <= t & event1 == 1 & time2 > t ~ 2, 
+                                     time1 <= t & event1 == 1 & 
+                                       time2 <= t & event2 == 1 ~ 3, 
+                                     time2 <= t & event1 == 0 & event2 == 1 ~ 4, 
+                                     .default = 0), 
+           PP_nonterm = ValPred$p_nonterm_only[t + 1, ], 
+           PP_term = ValPred$p_term_only[t + 1, ], 
+           PP_both = ValPred$p_both[t + 1, ], 
+           PP_ha = ValPred$p_neither[t + 1, ]
+           ) %>% 
+    group_by(id) %>% 
+    mutate(PP_max = max(PP_nonterm, PP_term, PP_both, PP_ha)) %>% 
+    mutate(pred_class = case_when(PP_nonterm == PP_max ~ 2, 
+                                  PP_term == PP_max ~ 4, 
+                                  PP_both == PP_max ~ 3, 
+                                  PP_ha == PP_max ~ 1, 
+                                  .default = 0))
+  
+  MCC_list[[j]] <- data.frame(time = t, 
+                              MCC = mltools::mcc(actuals = valDat_temp$current_class, 
+                                                 preds = valDat_temp$pred_class))
+  
+  j <- j + 1
+}
+
+list.rbind(MCC_list)
+
+```
+
+
+## Expected calibration error 
+
+The expected calibration error is computed for a sequence of landmark time points, as the empirical mean for all patients. 
+
+We currently have no censoring. 
+A potential expansion could be an IPW weighted estimator. 
+
+
+
+```{r, echo=F,message=F,warning=F,results='show', out.width = '1000px', dpi=300}
+
+ECE_list  <- list()
+j <- 1
+# all landmark points
+for (t in tseq_acc) {
+  
+  ECE_list[[j]] <- valDat %>% 
+    mutate(
+      delta_nonterm = ifelse(time1 <= t & delta1 == 1, 1, 0), 
+      delta_term = ifelse(time2 <= t & delta2 == 1, 1, 0), 
+      delta_both = ifelse(time2 <= t & delta12 == 1, 1, 0), 
+      delta_ha = ifelse(time1 > t & time2 > t, 1, 0), 
+      
+      
+      PP_nonterm = ValPred$p_nonterm_only[t + 1, ], 
+      PP_term = ValPred$p_term_only[t + 1, ], 
+      PP_both = ValPred$p_both[t + 1, ], 
+      PP_ha = ValPred$p_neither[t + 1, ]
+      
+    ) %>% 
+    summarize(
+      time = t, 
+      "Nonterminal" = mean(abs(PP_nonterm - delta_nonterm)), 
+      "Terminal" = mean(abs(PP_term - delta_term)), 
+      "Nonterminal + Terminal" = mean(abs(PP_both - delta_both)), 
+      "Healthy and Alive" = mean(abs(PP_ha - delta_ha))
+    )
+  
+  j <- j + 1 
+}
+
+ECE_df <- ECE_list %>% 
+  list.rbind() %>% 
+  gather(type, 
+         ece, 
+         -time)
+
+# visualize over time 
+ggplot(data = ECE_df, 
+       aes(x = time, 
+           y  = ece, 
+           color = type)) +
+  geom_point() +
+  geom_line() +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(x = "Time", 
+       y = "Expected calibration error (ECE)", 
+       color = "")
+
+```
+
+
+
+
+<!-- ## Loss function based discrepancy between predicted patient-specific and population-averaged CICs and observed empirical probabilities  -->
+
+<!-- Should we estimate the discrepancy between the predicted and observed probability on a patient or population based level to obtain an impression of prediction accuracy?  -->
+
+<!-- There are many possible metrics of distance: -->
+<!-- \begin{itemize} -->
+<!-- \item for probabilities: Kullback-Leibler -->
+<!-- \item for classification: multivariate Hinge loss  -->
+<!-- \item for predicted outcome: mean absolute distance, mean squared distance  -->
+<!-- \end{itemize} -->
+
+
+<!-- ```{r, echo=F,message=F,warning=F,results='show', out.width = '1000px', dpi=300} -->
+
+<!-- ``` -->
+
+
+
+<!-- ## IPW prediction accuracy  -->
+
+
+<!-- Administrative censoring: makes sense to just assume MAR censoring and adjust for it via IPW  -->
+<!-- Similar to volume under the ROC surface -->
+
+<!-- Truncation by death:  -->
+
+<!-- Underlying population: what if we only consider the outcome of interest and adjust for the fact that alternative events are happening?  -->
+
+<!-- (1) everyone dies, nothing else  -->
+<!-- delta_{D, i} / P(terminal only at Y_i; no other event happened before for i | Z) \cdot (Y_i - predicted RMTL) -->
+
+<!-- P(terminal event only <= \tau; no other events | Z) ?? -->
+
+
+<!-- (2) everyone experiences non-terminal event, nothing else  -->
+
+<!-- (3) everyone experiences non-terminal and terminal event, not just one or none -->
+
+
+
+
+## Healthy and Alive
+
+The probability for neither event happening equals the survival probability for the composite endpoint, consisting of the non-terminal outcome and mortality, whichever came earlier. 
+\begin{align}
+P(\text{Neither event is happening before/at } t) & = P(T_D > t; T_{NT} > t) \\
+& = P(\min(T_D, T_{NT}) > t) \\
+& = S(\tilde{T} > t)
+\end{align}
+where $\tilde{T} = \min(T_D, T_{NT})$ is the composite endpoint.
+
+
+To establish the prediction accuracy, we compare the predicted probability for being healthy and alive with the true probability according to the data simulation.
+We know the true hazard functions, under a semi-Markov assumption \footnote{Semi-Markov describes clock-reset; $\delta t$ denotes the time difference between the non-terminal and terminal event.}
+\begin{align}
+\lambda_1(t | x_i) & = \lambda_{01}(t) \cdot \gamma_i \cdot \exp(\beta_1^Tx_i) \\
+\lambda_2(t | x_i) & = \lambda_{02}(t) \cdot \gamma_i \cdot \exp(\beta_2^Tx_i) \\
+\lambda_3(\delta t | x_i) & = \lambda_{03}(\delta t) \cdot \gamma_i \cdot \exp(\beta_3^Tx_i)
+\end{align}
+Marginalizing over the frailty distribution, $\gamma_i \sim \Gamma(\theta, \theta)$, where $\theta = 1$, 
+\begin{align}
+\lambda_{m, j} (t | x_i) & = \lambda_{01}(t) \cdot \gamma_i \cdot \exp(\beta_1^Tx_i) \cdot E(\gamma_i | \theta = 1) \\ 
+& = \lambda_{01}(t) \cdot \gamma_i \cdot \exp(\beta_1^Tx_i) \cdot 1
+\end{align}
+And so the marginal quantities follow with $\gamma_i = 1$. 
+
+
+And in turn the true cumulative hazard functions,
+\begin{align}
+\Lambda_1(t | x_i) & = \gamma_i \int_0^{t} \lambda_1(u | x_i) \partial u \\
+\Lambda_2(t | x_i) & = \gamma_i \int_0^{t} \lambda_2(u | x_i) \partial u \\
+\Lambda_3(t | x_i) & = \gamma_i \int_0^{t} \lambda_3(\delta u | x_i) \partial \delta u 
+\end{align}
+
+The cumulative probability for healthy and alive can be expressed as
+\begin{align}
+P(\text{Healthy and Alive before / at } t) &= P(T_D > t, T_{NT} > t) \\
+& = \exp\left(-\gamma_i \cdot \left(\Lambda_1(t | x_i) + \Lambda_2(t | x_i) \right) \right) \\
+& = \exp\left( - \gamma_i \cdot \exp(\beta_1^Tx_i) \int_0^{t} \lambda_{01}(u) \partial u  \right) \cdot \exp\left( -\gamma_i \cdot \exp(\beta_2^Tx_i) \int_0^{t} \lambda_{02}(u) \partial u  \right) \\
+\end{align}
+
+The form of the baseline hazard is assumed to be known when fitting the Illness-Death model. 
+In any case, $\int_0^{t} \lambda_{01}(u) \partial u$ is the cumulative probability for the baseline hazard. 
+
+For a Weibull baseline hazard, $\int_0^{t} \lambda_{01}(u) \partial u = P(W \leq t)$ where $W \sim \text{Weibull}(\alpha, \kappa)$. 
+For piecewise constant hazard, $\int_0^{t} \lambda_{01}(u) \partial u = \sum_{k_j \leq t} (k_j - k_{j-1}) \delta_j$, where $k_j$ denotes the time knots and $\delta_j$ the hazard level. 
+
+
+We can estimate either the true hazard function on a patient specific level including the shared multiplicative frailty (\textcolor{#696969}{dark grey}) or the true marginal hazard function (\textcolor{#A9A9A9}{light grey}). 
+
+
+
+```{r echo=F,message=F,warning=F,results='show', out.width = '1000px', dpi=300}
+# Cox proportional hazard model 
+trainDat <- trainDat %>%
+  group_by(id) %>% 
+  mutate(compS = ifelse(event1 == 1 | event2 == 1, 1, 0),
+         compT = min(time1, time2)) %>% 
+  ungroup()
+
+valDat <- valDat %>%
+  group_by(id) %>% 
+  mutate(compS = ifelse(event1 == 1 | event2 == 1, 1, 0),
+         compT = min(time1, time2)) %>% 
+  ungroup()
+
+CoxPH_comp_EP <- coxph(Surv(trainDat$compT, trainDat$compS) ~ x1 + x2 + x3,
+                       trainDat) %>% 
+  survfit(newdata = valDat)
+
+# empirical estimation of cumulative probability to be healthy and alive 
+EE_comp_EP <- coxph(Surv(trainDat$compT, trainDat$compS) ~ 1) %>% 
+  survfit()
+
+EE_comp_EP_df <- data.frame(time = EE_comp_EP$time, 
+                            Prob = EE_comp_EP$surv)
+
+# true hazard function based on simulation 
+# covariate multiplicative effect for hazard for non-terminal event   
+H1_cov <- (as.matrix(valDat[, c("x1", "x2", "x3")]) %*% beta1_true) %>% exp()
+
+# covariate multiplicative effect for hazard for terminal event 
+H2_cov <- (as.matrix(valDat[, c("x1", "x2", "x3")]) %*% beta2_true) %>% exp()
+
+# baseline hazard for non-terminal event 
+# pw_cum_haz_NT <- pw_baseline %>% 
+#   filter(type == "h1") %>% 
+#   mutate(CumHaz = ((time_b - time) * beta) %>% cumsum())
+
+# baseline hazard for terminal event 
+# pw_cum_haz_T <- pw_baseline %>% 
+#   filter(type == "h2") %>% 
+#   mutate(CumHaz = ((time_b - time) * beta) %>% cumsum())
+
+g_list <- list()
+j <- 1 
+
+for (i in c(1, 10, 300, 500, 700, 1000)) {
+  SCR_pred <- data.frame(time = ValPred$tseq, 
+                         Prob = ValPred$p_neither[, i])
+  CPH_pred <- data.frame(time = CoxPH_comp_EP$time, 
+                         Prob = CoxPH_comp_EP$surv[, i])
+  
+  H1_cov_i <- H1_cov[i]
+  H2_cov_i <- H2_cov[i]
+  gamma_i <- valDat[i, ]$gamma.true
+  
+  TRUE_frailty_Prob <- data.frame(time = bs_hazard_1$time,
+                                  Prob = exp(-gamma_i * bs_hazard_1$bs_cumhazard * H1_cov_i - gamma_i * bs_hazard_2$bs_cumhazard * H2_cov_i))
+  TRUE_marg_Prob <- data.frame(time = bs_hazard_1$time,
+                               Prob = exp(-bs_hazard_1$bs_cumhazard * H1_cov_i - bs_hazard_2$bs_cumhazard * H2_cov_i))
+  
+  
+  
+  g <- ggplot(data = SCR_pred, 
+              aes(x = time, 
+                  y = Prob, 
+                  color = "Illness-Death prediction")) +
+    geom_line() +
+    geom_line(data = CPH_pred, 
+              aes(x = time, 
+                  y = Prob, 
+                  color = "Composite Cox regression")) +
+    geom_line(data = EE_comp_EP_df, 
+              aes(x = time, 
+                  y = Prob, 
+                  color = "KM Survival")) +
+    geom_line(data = TRUE_frailty_Prob, 
+              aes(x = time, 
+                  y = Prob), 
+              color = "#696969", 
+              linetype = "dashed") +
+        geom_line(data = TRUE_marg_Prob, 
+              aes(x = time, 
+                  y = Prob), 
+              color = "#A9A9A9", 
+              linetype = "dashed") +
+    theme_bw() +
+    # theme(legend.position = "bottom") +
+    labs(y = "Probability Healthy and Alive", 
+         color = "",
+         linetype = "", 
+         # caption = "Curve in black is true probability."
+         )
+    
+  
+  g_list[[j]] <- g 
+  j <- j + 1
+  
+}
+
+ggarrange(plotlist = g_list, 
+          nrow = 2, ncol = 3, 
+          common.legend = TRUE,
+          legend = "bottom")
+
+```
+
+
+We consider classification over time and according to 
+\begin{enumerate}
+\item maximum probability
+\item maximum standardized probability 
+\end{enumerate}
+
+We consider the classification accuracy at a discrete set of (ideally clinically motivated) landmark time points, $t = \{50, 75, 100\}$. 
+
+```{r, echo=T,message=F,warning=F,results='show', out.width = '1000px', dpi=300}
+SCR_HA_list <- list()
+j <- 1
+
+C_COX <- c()
+for (t in tseq_acc) {
+  
+   SCR_HA_list[[j]] <- valDat %>% 
+    mutate(current_class = case_when(time1 > t & time2 > t ~ "Healthy and Alive", 
+                                     time1 <= t & event1 == 1 & time2 > t ~ "Non-Terminal", 
+                                     time1 <= t & event1 == 1 & 
+                                       time2 <= t & event2 == 1 ~ "Both", 
+                                     time2 <= t & event1 == 0 & event2 == 1 ~ "Terminal", 
+                                     .default = "Censored"), 
+           PP_nonterm = ValPred$p_nonterm_only_marg[t + 1, ], 
+           PP_term = ValPred$p_term_only_marg[t + 1, ], 
+           PP_both = ValPred$p_both_marg[t + 1, ], 
+           PP_ha = ValPred$p_neither_marg[t + 1, ]
+           ) %>% 
+     mutate(PP_nonterm_stand = scale(PP_nonterm), 
+            PP_term_stand = scale(PP_term), 
+            PP_both_stand = scale(PP_both), 
+            PP_ha_stand = scale(PP_ha)) %>% 
+    group_by(id) %>% 
+    mutate(PP_max = max(PP_nonterm, PP_term, PP_both, PP_ha),
+           PP_max_stand = max(PP_nonterm_stand, PP_term_stand, PP_both_stand, PP_ha_stand)) %>% 
+    mutate(pred_class = case_when(PP_nonterm == PP_max ~ "Non-Terminal", 
+                                  PP_term == PP_max ~ "Terminal", 
+                                  PP_both == PP_max ~ "Both", 
+                                  PP_ha == PP_max ~ "Healthy and Alive", 
+                                  .default = NA), 
+           pred_class_stand = case_when(PP_nonterm_stand == PP_max_stand ~ "Non-Terminal", 
+                                  PP_term_stand == PP_max_stand ~ "Terminal", 
+                                  PP_both_stand == PP_max_stand ~ "Both", 
+                                  PP_ha_stand == PP_max_stand ~ "Healthy and Alive", 
+                                  .default = NA)
+           ) %>% 
+     ungroup() %>% 
+     dplyr::select(id, current_class, pred_class, pred_class_stand, PP_ha, PP_ha_stand)
+   
+   j <- j + 1
+  
+   
+   # C-index for composite endpoint survival analysis 
+   trainDat_temp <- trainDat %>% filter(time_comp <= t)
+   CoxPH_comp_model <- coxph(Surv(compT, compS) ~ x1 + x2 + x3,
+                             trainDat_temp)
+   C_COX <- c(C_COX, 
+              survConcordance(Surv(compT, compS) ~ predict(CoxPH_comp_model), 
+                   data = trainDat_temp)$concordance)
+   
+}
+
+
+SCR_HA_pred <- list.rbind(SCR_HA_list)  %>% 
+  mutate(time = rep(tseq_acc, each = 1000), 
+         pred_HA = ifelse(pred_class == "Healthy and Alive", 
+                          1, 0), 
+         pred_HA_stand = ifelse(pred_class_stand == "Healthy and Alive", 
+                          1, 0), 
+         true_HA = ifelse(current_class == "Healthy and Alive", 
+                          1, 0)) 
+```
+
+
+### C-index
+The C-index describes the number of concordant pairs of observed and predicted classification compared to all pairs.
+In terms of binary classification, it equals counting the number of correctly classified (correct positive and correct negative) and dividing it by the sample size. 
+
+```{r, echo=F,message=F,warning=F,results='show', out.width = '1000px', dpi=300}
+# manually compute C-index for binary classification on probabilities and standardized probabilities 
+C_SCR_HA_pred <- SCR_HA_pred %>% 
+  mutate(concordant = pred_HA == true_HA, 
+         concordant_stand = pred_HA_stand == true_HA, 
+         discordant = pred_HA != true_HA) %>% 
+  group_by(time) %>% 
+  summarize(C = sum(concordant) / sum(concordant + discordant), 
+            C_stand = sum(concordant_stand) / sum(concordant_stand + discordant)) %>% 
+  mutate(C_COX = C_COX)
+
+
+ggplot(data = C_SCR_HA_pred, 
+       aes(x = time, 
+           y = C, 
+           color = "Max. prob. class.")) +
+  geom_line() +
+  geom_line(aes(y = C_stand, 
+                color = "Max. standardized prob. class.")) +
+  geom_line(aes(y = C_COX, 
+                color = "Cox composite endpoint (Cov. adj.)"), 
+            linetype = "dashed") +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(x = "Time", 
+       y = "C-index", 
+       color = "", 
+       title = "Healthy and Alive")
+
+```
+
+### Calibration Plot
+For each state, we plot the observed indicator and predicted cumulative probability at a specific time point. 
+There is no clear separation between the patients who are healthy and alive and the non-healthy and/or dead patients.
+
+```{r, echo=F,message=F,warning=F,results='show', out.width = '1000px', dpi=300}
+SCR_HA_pred_temp <- SCR_HA_pred %>% 
+  filter(time %in% c(5, 25, 50, 75, 90, 100))
+
+# for probability based classification 
+g1 <- ggplot(data = SCR_HA_pred_temp, 
+       aes(x = PP_ha, 
+           y = true_HA)) + 
+  geom_point(alpha = 0.1) +
+  theme_bw() +
+  facet_wrap(~ time, nrow = 2) +
+  labs(x = "Probability of being Healthy and Alive",
+       y = "True status", 
+       # title = "Probability based classification"
+       )
+
+# for classification based on standardized probability 
+g2 <- ggplot(data = SCR_HA_pred_temp, 
+       aes(x = PP_ha_stand, 
+           y = true_HA)) + 
+  geom_point(alpha = 0.1) +
+  theme_bw() +
+  facet_wrap(~ time, nrow = 2) +
+  labs(x = "Stand. Probability of being Healthy and Alive",
+       y = "True status", 
+       # title = "Standardized probability based classification"
+       )
+
+ggarrange(g1, g2, nrow = 1)
+
+```
+
+
+### Brier score
+The Brier score is a time dependent metric, frequently used to measure prediction accuracy. 
+\begin{align}
+\text{Brier} & = \frac{1}{n} \sum \left(P(T_D > t, T_{NT} > t | x_i) - \delta(t) \right)^2
+\end{align}
+where the indicator $\delta(t) = (1 - \delta_D(t)) \cdot (1 - \delta_{NT}(t))$ takes the value 1 if the patient is still healthy and alive. 
+
+It is estimated on the validation data. 
+
+```{r, echo=F,message=F,warning=F,results='show', out.width = '1000px', dpi=300}
+# Brier score over time for composite endpoints 
+CoxPH_comp_model <- coxph(Surv(compT, compS) ~ x1 + x2 + x3,
+                          trainDat, 
+                          x = TRUE)
+
+COX_brier <- brier(fit = CoxPH_comp_model, 
+                   times = tseq_acc, 
+                   newdata = valDat)
+
+# manual estimation
+SCR_brier <- SCR_HA_pred %>% 
+  group_by(time, id) %>% 
+  mutate(summand = (PP_ha - true_HA)^2) %>%  
+  ungroup() %>% 
+  group_by(time) %>% 
+  summarize(brier = mean(summand))
+  
+
+# visualize
+ggplot(data = SCR_brier, 
+       aes(x = time, 
+           y = brier, 
+           color = "Illness-Death (Cov. adj.)")) + 
+  geom_line() +
+  geom_line(data = data.frame(time = COX_brier$times, 
+                              brier = COX_brier$brier), 
+            aes(x = time, 
+                y = brier, 
+                color = "Cox comp. endpoint (Cov. adj.)")) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(x = "Time", 
+       y = "Brier score", 
+       color = "")
+```
+
+
+
+### Specificity and Sensitivity over time
+At landmark points, specificity (correct positive) and sensitivity (correct negative) are computed. 
+It estimates the Inverse Probability of Censoring Weighting (IPCW) estimates of Cumulative/Dynamic time-dependent ROC curve. 
+
+```{r, echo=F,message=F,warning=F,results='show', out.width = '1000px', dpi=300}
+library(timeROC)
+# Sensitivity and Specificity over time for composite endpoints 
+CoxPH_risk_pred <- predict(CoxPH_comp_model, 
+                           newdata = valDat, 
+                           "risk")
+
+# Assuming your data has time, status, and risk scores, you can calculate the time-dependent ROC curve
+CoxPH_roc <- timeROC(T = valDat$compT, 
+                     delta = valDat$compS, 
+                     marker = CoxPH_risk_pred, 
+                     cause = 1,        
+                     times = tseq_acc, 
+                     iid = TRUE)
+
+# Sensitivity and specificity at the chosen time points
+CoxPH_sens_spec <- data.frame(time = tseq_acc, 
+                              sens = CoxPH_roc$TP %>% apply(MARGIN = 2, mean), 
+                              spec = (1 - CoxPH_roc$FP) %>% apply(MARGIN = 2, mean))
+
+# manual estimation
+SCR_sens_spec <- SCR_HA_pred %>% 
+  group_by(time) %>% 
+  summarize(sens = sum(pred_HA == 1 & true_HA == 1) / sum(pred_HA), 
+            spec = sum(pred_HA == 0 & true_HA == 0) / sum(pred_HA == 0))
+  
+# visualize sensitivity 
+ggplot() +
+  geom_line(data = CoxPH_sens_spec, 
+       aes(x = time, 
+           y = sens, 
+           linetype = "Sensitivity",
+           color = "Cox comp. endpoint (Cov. adj.)")) +
+  geom_line(data = CoxPH_sens_spec, 
+       aes(x = time, 
+           y = spec, 
+           linetype = "Specificity",
+           color = "Cox comp. endpoint (Cov. adj.)")) +
+  geom_line(data = SCR_sens_spec, 
+            aes(x = time, 
+                y = sens, 
+                linetype = "Sensitivity", 
+                color = "Illness-Death (Cov. adj.)")) +
+  geom_line(data = SCR_sens_spec, 
+            aes(x = time, 
+                y = spec, 
+                linetype = "Specificity", 
+                color = "Illness-Death (Cov. adj.)")) +
+  theme_bw() +
+  labs(x = "Time", 
+       y = "Sensitivity / Specificity", 
+       color = "", 
+       linetype = "")
+
+```
+
+
+## Clinical communication 
+For a certain strata; how many people would be considered to be in which state at the end of some period? Shading of people over time?? 
+
+```{r}
+
+N_viz <- 100
+N_viz_patients <- list()
+N_viz_patients[[1]] <- data.frame(n_nonterm_diff = 0, 
+                                  n_term_diff = 0, 
+                                  n_both_diff = 0,
+                                  
+                                  n_nonterm = 0, 
+                                  n_term = 0, 
+                                  n_both = 0,
+                                  
+                                  n_ha = N_viz, 
+                                  time = 0)
+
+j <- 1 
+for (t in tseq_acc) {
+  
+  N_viz_temp <- valDat %>% 
+    mutate(current_class = case_when(time1 > t & time2 > t ~ "Healthy and Alive", 
+                                     time1 <= t & event1 == 1 & time2 > t ~ "Non-Terminal", 
+                                     time1 <= t & event1 == 1 & 
+                                       time2 <= t & event2 == 1 ~ "Both", 
+                                     time2 <= t & event1 == 0 & event2 == 1 ~ "Terminal", 
+                                     .default = "Censored"), 
+           PP_nonterm = ValPred$p_nonterm_only_marg[t + 1, ], 
+           PP_term = ValPred$p_term_only_marg[t + 1, ], 
+           PP_both = ValPred$p_both_marg[t + 1, ]
+           ) %>% 
+    summarize(n_nonterm = mean(PP_nonterm) * N_viz, 
+              n_term = mean(PP_term) * N_viz, 
+              n_both = mean(PP_both) * N_viz)
+    
+  # change in number of patients in certain state 
+  N_viz_patients[[j + 1]] <- data.frame(
+    n_nonterm_diff = N_viz_temp$n_nonterm - N_viz_patients[[j]]$n_nonterm_diff, 
+    n_term_diff = N_viz_temp$n_term - N_viz_patients[[j]]$n_term_diff, 
+    n_both_diff = N_viz_temp$n_both - N_viz_patients[[j]]$n_both_diff, 
+    
+    n_nonterm = N_viz_temp$n_nonterm, 
+    n_term = N_viz_temp$n_term, 
+    n_both = N_viz_temp$n_both
+  ) %>% 
+    mutate(n_ha = N_viz - N_viz_temp$n_nonterm - N_viz_temp$n_term - N_viz_temp$n_both, 
+           time = t)
+  j <- j + 1 
+}
+
+N_viz_patients_df <- N_viz_patients %>% 
+  list.rbind() %>% 
+  dplyr::select(-c(n_nonterm_diff, n_term_diff, n_both_diff)) %>% 
+  gather(key = "outcome", 
+         value = "num_pat", 
+         -time) %>% 
+  mutate(outcome_f = factor(outcome, 
+                            levels = c("n_term",
+                                       "n_both", 
+                                       "n_nonterm", 
+                                       "n_ha"), 
+                            labels = c("Dead", 
+                                       "Ill + Dead", 
+                                       "Ill + Alive", 
+                                       "Healthy + Alive")))
+
+# for now, draw barplot to show the change in patients 
+ggplot(data = N_viz_patients_df, 
+       aes(x = time,
+           fill = outcome_f, 
+           y = num_pat)) +
+  geom_bar(stat = "identity") +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(x = "Time", 
+       y = "No. of patients", 
+       title = "Among 100 patients, over time, how many are suffering from non-terminal event, dead, dead post disease, or healthy and alive?", 
+       fill = "") + 
+  scale_fill_manual(values = c("Ill + Dead" = cb_purple,
+                               "Ill + Alive" = cb_blue, 
+                               "Dead" = cb_red, 
+                               "Healthy + Alive" = cb_grey))
+
+```
+
+
+

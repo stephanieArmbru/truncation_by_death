@@ -1,0 +1,86 @@
+
+---
+title: "Neonatal BPD Outcome Estimator (2022): Infants with GA 23-28 weeks & Birth Weight 501-1250g"
+output: html_document
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+# {.tabset .tabset-fade .tabset-pills} 
+
+```{r}
+library(tidyverse)
+library(readr)
+
+```
+
+
+# Estimation of BPD risk score over time for example infant
+```{r}
+BPD_coef <- read_csv("BPD_risk_score.csv")
+
+BPD_coef %>% colnames()
+BPD_coef %>% str()
+
+BPD_coef$`Postnatal Day/Outcome` <- NULL
+
+# define an example patient
+# 650 g birth weight
+x_infant_desc <- c("650 g birthweight, 28 gestational age, 60%FiO2, female ANS 1, SurgNEC 1, nconventional ventilation (CV)")
+x_infant <- c(1, 6.50, 28, 0.60 * 5, 0, 1, 1, 
+              0, 1, 0, 0, 0, 0, 0) # ventilation dummy
+
+BPD_coef_long <- BPD_coef %>% 
+  gather(key = "coef", 
+         value = "value", 
+         -c(Day, Outcome))
+
+
+# retains ordering of coefficients and so input data and coefficient vector "match" 
+BPD_risk_score_pred <- BPD_coef_long %>% 
+  group_by(Day, Outcome) %>% 
+  mutate(nom = exp(value %*% x_infant)) %>% 
+  ungroup() %>% 
+  select(Day, Outcome, nom) %>% 
+  unique() %>% 
+  group_by(Day) %>% 
+  mutate(noBPD = 1 / (1 + sum(nom))) %>% 
+  ungroup() %>% 
+  mutate(Prob = nom * noBPD)
+
+BPD_risk_score_pred_probs <- BPD_risk_score_pred %>% 
+  select(Day, Outcome, Prob) 
+
+noBPD_df <- BPD_risk_score_pred %>% 
+  group_by(Day) %>% 
+  summarize(Prob = unique(noBPD)) %>% 
+  mutate(Outcome = "noBPD")
+
+BPD_risk_score_pred_probs <- rbind(BPD_risk_score_pred_probs, 
+                                   noBPD_df)
+
+# check for correctness, probabilities must sum to one 
+BPD_risk_score_pred_probs %>% 
+  group_by(Day) %>% 
+  summarize(sum(Prob))
+```
+
+# Visualization
+```{r}
+ggplot(data = BPD_risk_score_pred_probs, 
+       aes(x = Day, 
+           y = Prob, 
+           color = Outcome)) +
+  geom_point() +
+  geom_line() +
+  geom_vline(aes(xintercept = x), 
+             data = data.frame(x = c(1, 3, 7, 14, 28)), 
+             linetype = "dashed", 
+             color = "grey") +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(color = "",
+       caption = x_infant_desc)
+
+```
+
+
