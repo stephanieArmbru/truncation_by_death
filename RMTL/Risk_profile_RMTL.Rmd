@@ -155,14 +155,14 @@ plot_risk_profile_grant <- function(tseq_pred,
                     ValPred$p_term_only[, i],
                     ValPred$p_both[, i],
                     ValPred$p_nonterm_only[, i]),
-    Outcome=factor(x = c(rep("Alive without ICD shock",length_tseq),
-                         rep("Death",length_tseq),
-                         rep("ICD shock + Death",length_tseq),
-                         rep("ICD shock",length_tseq)),
-                   levels = c("Alive without ICD shock",
-                              "Death",
-                              "ICD shock + Death",
-                              "ICD shock"))
+    Outcome=factor(x = c(rep("Alive+Healthy",length_tseq),
+                         rep("Dead",length_tseq),
+                         rep("Shock+Dead",length_tseq),
+                         rep("Shock",length_tseq)),
+                   levels = c("Alive+Healthy",
+                              "Dead",
+                              "Shock+Dead",
+                              "Shock"))
   )
   
     g <- ggplot() +
@@ -633,6 +633,7 @@ ggsave("Figures/RMTL_plots.pdf",
 ```
 
 
+## F31 Grant example 
 ```{r}
 # one for F31 example 
 valDat_one <- valDat[100, ]
@@ -660,7 +661,7 @@ g <- plot_risk_profile_grant(tseq_pred = tseq_pred,
 g
 
 ggsave("Figures/RMTL_grant.pdf", 
-       width = 15, height = 15, unit = "cm")
+       width = 11, height = 11, unit = "cm")
 
 label 
 ```

@@ -1,6 +1,11 @@
 #### SIMULATION OF SEMICOMPETING SURIVAL DATA AND LONGITUDINAL COVARIATE ####
 set.seed(2024)
 
+
+# according to Harrison's data generating mechanism
+# based on B-spline hazard functions
+# inverse sampling method
+
 # Libraries ---------------------------------------------------------------
 library(tidyverse)
 library(checkmate)

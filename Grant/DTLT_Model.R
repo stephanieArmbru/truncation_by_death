@@ -29,9 +29,9 @@ expit <- function(mu) {
   exp(mu) / (1 + exp(mu))
 }
 
-long_traj <- function(x, t, beta, n) {
+long_traj <- function(x, t, beta, n, has_trend = 0) {
   rnorm(n = n,
-        mean = mean_trend(t) + x %*% beta,
+        mean = has_trend * mean_trend(t) + x %*% beta,
         sd = 0.1)
 }
 
@@ -60,6 +60,7 @@ for (t in time_sequence) {
 }
 
 traj_df <- list.rbind(traj)
+
 ggplot(data = traj_df %>% filter(id %in% sample(seq(1, n), 10)),
        aes(x = time,
            y = traj,
@@ -77,7 +78,7 @@ ggplot(data = traj_df %>% filter(id %in% sample(seq(1, n), 10)),
 
 beta_death <- c(-5.5, 0.2, -0.2, 2)
 
-# local parameters
+# local parameters for each time partition subset
 # loc_beta <- runif(n = length(time_sequence),
 #                   min = -2, max = 2)
 loc_beta <- runif(n = length(time_sequence),
@@ -117,7 +118,7 @@ for (j in seq(1, length(time_sequence) - 1)) {
 }
 
 data_death <- data_death %>%
-  select(id, time) %>%
+  dplyr::select(id, time) %>%
   mutate(time = ifelse(is.na(time), truncation_time + 1, time)) %>%
   group_by(id) %>%
   mutate(time_death = min(time, truncation_time),
@@ -148,16 +149,17 @@ P[[1]] <- data.frame(id = seq(1, n),
 
 # landmarking style
 for (j in seq(1, length(time_sequence) - 1)) {
-
-  # longitudinal value at landmarking time point
-  traj_death[[j]] <-  traj[[j]] %>%
-    mutate(traj_trunc = ifelse(data_death$time_death >= time_sequence[j], traj, NA),
-           delta_death = ifelse(data_death$time_death > time_sequence[j], 0, 1))
+#
+#   # longitudinal value at landmarking time point
+#   traj_death[[j]] <-  traj[[j]] %>%
+#     mutate(traj_trunc = ifelse(data_death$time_death >= time_sequence[j], traj, NA),
+#            delta_death = ifelse(data_death$time_death > time_sequence[j], 0, 1))
 
   # Design matrix
   long_X <- (traj[[j]]$traj - mean(traj[[j]]$traj)) / sd(traj[[j]]$traj)
   x <- cbind(X, long_X)
 
+  # probability for death
   prob_death <- 1 - exp(-(1 / abs(x %*% beta_death + loc_beta[j] * long_X)) %*% (time_sequence[t + 1] - time_sequence[t]))
 
   cum_prob_survival <- cum_prob_survival * (1 - prob_death)
@@ -168,6 +170,13 @@ for (j in seq(1, length(time_sequence) - 1)) {
                        delta_death = ifelse(data_death$time_death > time_sequence[j], 0, 1),
                        surv_prob = cum_prob_survival)
 }
+
+# format to data frame
+P_df <- list.rbind(P)
+
+res_df <- inner_join(traj_df,
+                     P_df,
+                     by = c("id", "time"))
 
 
 # Occurrence --------------------------------------------------------------
@@ -190,9 +199,6 @@ ggplot(data_death[sample(seq(1, n), 10), ],
 
 
 # Visualize trajectory and mortality --------------------------------------
-traj_death_df <- list.rbind(traj_death)
-P_df <- list.rbind(P)
-
 # identify good example patients
 P_df %>%
   group_by(id) %>%
@@ -204,13 +210,13 @@ P_df %>% filter(delta_death == 0 & time == truncation_time)
 example_ind <- c(13, 74, 44, 99)
 
 # scaling for visualization
-scale_factor <- traj_death_df$traj_trunc %>%
+scale_factor <- traj_df$traj %>%
   na.omit() %>%
   max() %>%
   ceiling()
 
 g1 <- ggplot() +
-  geom_smooth(data = traj_death_df %>%
+  geom_smooth(data = traj_df %>%
                 filter(id %in% example_ind) %>%
                 na.omit(),
               aes(x = time,
@@ -280,225 +286,199 @@ ggsave("Grant/joint_traj_only.pdf",
 
 
 # Population average for mortal and immortal cohort -----------------------
-traj_mortal_immortal <- traj_death_df %>%
+
+res_df %>%
+  filter(time == 0) %>%
+  summarize(traj = mean(traj),
+            traj_delta = mean(traj * (1 - delta_death)))
+
+res_df %>%
+  filter(time == 0 & traj > 20 & traj < 30)
+
+
+traj_mortal_immortal <- res_df %>%
   group_by(time) %>%
-  summarize(mean_mortal = traj_trunc %>%
-              na.omit() %>%
-              mean(),
-            mean_immortal = traj %>%
-              mean())
+  summarize(mean_mortal = mean(traj * (1 - delta_death)),
+            mean_immortal = mean(traj))
 
 g_mean <- ggplot(data = traj_mortal_immortal) +
-  geom_smooth(aes(x = time,
+  geom_line(aes(x = time,
                 y = mean_mortal,
                 color = "Mortal cohort"),
-              se = F) +
-  geom_smooth(aes(x = time,
+            linewidth = 1) +
+  geom_line(aes(x = time,
                 y = mean_immortal,
                 color = "Immortal cohort"),
-              se = F) +
+            linewidth = 1) +
+  geom_line(data = res_df %>%
+              filter(id == 6),
+            aes(x = time,
+            y = traj),
+            color = "gray",
+            linewidth = 1) +
   theme_bw() +
   theme(legend.position = "bottom") +
   labs(y = "Longitudinal Trajectory",
        x = "Time",
        color = "") +
   scale_color_manual(values = c("Immortal cohort" = "#66C266",
-                                "Mortal cohort" = "#154F15")) +
-  ylim(c(0, 70))
+                                "Mortal cohort" = "#154F15"))
 
 g_mean
-
-ggsave("Grant/mean_traj.pdf",
-       height = 10, width = 8, unit = "cm")
 
 
 # Heterogeneity -----------------------------------------------------------
 # according to PIPER-ICD grant
 
-# at time point 0
-traj_death_t0 <- traj_death_df %>%
+# order according to longitudinal marker at time 0
+ordering_t0 <- res_df %>%
   filter(time == 0) %>%
-  mutate(plot_color = paste(delta_death, "_Traj", sep = ""))
+  pull(traj) %>%
+  rank()
 
-P_t0 <- P_df %>%
+res_df <- res_df %>%
+  group_by(time) %>%
+  mutate(id_ordered = ordering_t0)
+
+# at time point 0
+res_t0 <- res_df %>%
   filter(time == 0) %>%
-  mutate(plot_color = paste(delta_death, "_Prob", sep = ""))
+  mutate(plot_color = as.character(delta_death))
 
 # at time point 10
-traj_death_t1 <- traj_death_df %>%
+res_t1 <- res_df %>%
   filter(time == 10) %>%
-  mutate(plot_color = paste(delta_death, "_Traj", sep = ""))
-
-P_t1 <- P_df %>%
-  filter(time == 10) %>%
-  mutate(plot_color = paste(delta_death, "_Prob", sep = ""))
+  mutate(plot_color = as.character(delta_death))
 
 # at time point 20
-traj_death_t2 <- traj_death_df %>%
+res_t2 <- res_df %>%
   filter(time == 19) %>%
-  mutate(plot_color = paste(delta_death, "_Traj", sep = ""))
-
-P_t2 <- P_df %>%
-  filter(time == 19) %>%
-  mutate(plot_color = paste(delta_death, "_Prob", sep = ""))
-
-scale_factor <- traj_death_t2$traj %>%
-  max() %>%
-  ceiling()
-
+  mutate(plot_color = as.character(delta_death))
 
 # time 0
-g_t0 <- ggplot() +
-  # geom_line(data = P_t1,
-  #           aes(x = id,
-  #               y = 1 - surv_prob),
-  #           color = "#DC267F") +
-  geom_line(data = P_t0,
-           aes(x = id,
+g_t0_mortality <- ggplot() +
+  geom_line(data = res_t0,
+           aes(x = id_ordered,
                y = 1 - surv_prob,
                color = plot_color)) +
-  geom_line(data = traj_death_t0,
-            aes(x = id,
-                y = traj / scale_factor),
-            color = "forestgreen") +
-  geom_point(data = traj_death_t0,
-             aes(x = id,
-                 y = traj / scale_factor,
-                 color = plot_color)) +
-  scale_y_continuous(
-    name = "Mortality Probability",
-    sec.axis = sec_axis(~ . * scale_factor, name = "Longitudinal Trajectory")
-    # limits = c(0, 1)
-  ) +
-  scale_fill_manual(values = c("0_Traj" = "forestgreen",
-                               "0_Prob" = "#DC267F",
-                               "1_Traj" = "#CACACA",
-                               "1_Prob" = "#CACACA"),
-                    labels = c("0_Traj" = "Trajectory - Alive",
-                               "0_Prob" = "Probability - Alive",
-                               "1_Traj" = "Trajectory - Dead",
-                               "1_Prob" = "Probability - Dead")) +
-  scale_color_manual(values = c("0_Traj" = "forestgreen",
-                                "0_Prob" = "#DC267F",
-                                "1_Traj" = "#CACACA",
-                                "1_Prob" = "#CACACA"),
-                     labels = c("0_Traj" = "Trajectory - Alive",
-                                "0_Prob" = "Probability - Alive",
-                                "1_Traj" = "Trajectory - Dead",
-                                "1_Prob" = "Probability - Dead")) +
-  labs(x = "Patient ID",
+  scale_color_manual(values = c("0" = "#DC267F",
+                                "1" = "#CACACA"),
+                     labels = c("0" = "Alive",
+                                "1" = "Dead")) +
+  labs(x = "Patient ID", y = "Death Probability",
        color = "", fill = "",
        title = expression(tau[k] *"=0")) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  ylim(c(0, 1))
+
+g_t0_marker <- ggplot() +
+  geom_point(data = res_t0,
+            aes(x = id_ordered,
+                y = traj,
+                color = plot_color),
+            alpha = 0.7) +
+  scale_color_manual(values = c("0" = "forestgreen",
+                                "1" = "#CACACA"),
+                     labels = c("0" = "Alive",
+                                "1" = "Dead")) +
+  labs(x = "Patient ID", y = "Longitudinal marker",
+       color = "", fill = ""
+       ) +
   theme_bw() +
   theme(legend.position = "bottom")
 
 # time 10
-g_t1 <- ggplot() +
-  # geom_line(data = P_t1,
-  #           aes(x = id,
-  #               y = 1 - surv_prob),
-  #           color = "#DC267F") +
-  geom_col(data = P_t1,
-           aes(x = id,
-               y = 1 - surv_prob,
-               fill = plot_color)) +
-  geom_line(data = traj_death_t1,
-            aes(x = id,
-                y = traj / scale_factor),
-            color = "forestgreen") +
-  geom_point(data = traj_death_t1,
-            aes(x = id,
-                y = traj / scale_factor,
-                color = plot_color)) +
-  scale_y_continuous(
-    name = "Mortality Probability",
-    sec.axis = sec_axis(~ . * scale_factor, name = "Longitudinal Trajectory")
-    # limits = c(0, 1)
-  ) +
-  scale_fill_manual(values = c("0_Traj" = "forestgreen",
-                                "0_Prob" = "#DC267F",
-                                "1_Traj" = "#CACACA",
-                                "1_Prob" = "#CACACA"),
-                     labels = c("0_Traj" = "Trajectory - Alive",
-                                "0_Prob" = "Probability - Alive",
-                                "1_Traj" = "Trajectory - Dead",
-                                "1_Prob" = "Probability - Dead")) +
-  scale_color_manual(values = c("0_Traj" = "forestgreen",
-                               "0_Prob" = "#DC267F",
-                               "1_Traj" = "#CACACA",
-                               "1_Prob" = "#CACACA"),
-                    labels = c("0_Traj" = "Trajectory - Alive",
-                               "0_Prob" = "Probability - Alive",
-                               "1_Traj" = "Trajectory - Dead",
-                               "1_Prob" = "Probability - Dead")) +
-  labs(x = "Patient ID",
+g_t1_mortality <- ggplot() +
+  geom_col(data = res_t1,
+            aes(x = id_ordered,
+                y = 1 - surv_prob,
+                fill = plot_color)) +
+  scale_fill_manual(values = c("0" = "#DC267F",
+                                "1" = "#CACACA"),
+                     labels = c("0" = "Alive",
+                                "1" = "Dead")) +
+  labs(x = "Patient ID", y = "Death Probability",
        color = "", fill = "",
        title = expression(tau[k] *"=10")) +
   theme_bw() +
   theme(legend.position = "bottom")
 
+g_t1_marker <- ggplot() +
+  geom_point(data = res_t1,
+             aes(x = id_ordered,
+                 y = traj,
+                 color = plot_color),
+             alpha = 0.7) +
+  scale_color_manual(values = c("0" = "forestgreen",
+                                "1" = "#CACACA"),
+                     labels = c("0" = "Alive",
+                                "1" = "Dead")) +
+  labs(x = "Patient ID", y = "Longitudinal marker",
+       color = "", fill = ""
+       ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+
 # time 19
-g_t2 <- ggplot() +
-  # geom_line(data = P_t1,
-  #           aes(x = id,
-  #               y = 1 - surv_prob),
-  #           color = "#DC267F") +
-  geom_col(data = P_t2,
-           aes(x = id,
-               y = 1 - surv_prob,
-               fill = plot_color)) +
-  geom_line(data = traj_death_t2,
-            aes(x = id,
-                y = traj / scale_factor),
-            color = "forestgreen") +
-  geom_point(data = traj_death_t2,
-             aes(x = id,
-                 y = traj / scale_factor,
-                 color = plot_color)) +
-  scale_y_continuous(
-    name = "Mortality Probability",
-    sec.axis = sec_axis(~ . * scale_factor, name = "Longitudinal Trajectory")
-    # limits = c(0, 1)
-  ) +
-  scale_fill_manual(values = c("0_Traj" = "forestgreen",
-                               "0_Prob" = "#DC267F",
-                               "1_Traj" = "#CACACA",
-                               "1_Prob" = "#CACACA"),
-                    labels = c("0_Traj" = "Trajectory - Alive",
-                               "0_Prob" = "Probability - Alive",
-                               "1_Traj" = "Trajectory - Dead",
-                               "1_Prob" = "Probability - Dead")) +
-  scale_color_manual(values = c("0_Traj" = "forestgreen",
-                                "0_Prob" = "#DC267F",
-                                "1_Traj" = "#CACACA",
-                                "1_Prob" = "#CACACA"),
-                     labels = c("0_Traj" = "Trajectory - Alive",
-                                "0_Prob" = "Probability - Alive",
-                                "1_Traj" = "Trajectory - Dead",
-                                "1_Prob" = "Probability - Dead")) +
-  labs(x = "Patient ID",
+g_t2_mortality <- ggplot() +
+  geom_col(data = res_t2,
+            aes(x = id_ordered,
+                y = 1 - surv_prob,
+                fill = plot_color)) +
+  scale_fill_manual(values = c("0" = "#DC267F",
+                                "1" = "#CACACA"),
+                     labels = c("0" = "Alive",
+                                "1" = "Dead")) +
+  labs(x = "Patient ID", y = "Death Probability",
        color = "", fill = "",
        title = expression(tau[k] *"=19")) +
   theme_bw() +
   theme(legend.position = "bottom")
 
-g_shared_legend <- ggarrange(g_t1, g_t2,
-                             ncol = 2,
-                             common.legend = TRUE,
-                             legend = "bottom")
+g_t2_marker <- ggplot() +
+  geom_point(data = res_t2,
+             aes(x = id_ordered,
+                 y = traj,
+                 color = plot_color),
+             alpha = 0.7) +
+  scale_color_manual(values = c("0" = "forestgreen",
+                                "1" = "#CACACA"),
+                     labels = c("0" = "Alive",
+                                "1" = "Dead")) +
+  labs(x = "Patient ID", y = "Longitudinal marker",
+       color = "", fill = ""
+       ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
 
-g_time <- ggarrange(g_t0, g_shared_legend,
-                    # align = "h",
-          ncol = 2, nrow = 1,
-          widths = c(1, 2))
-ggsave("Grant/joint_traj_at_landmark_times_no_mean.pdf",
-       height = 10,
-       width = 25,
+
+
+g <- ggarrange(g_t0_mortality,
+          g_t1_mortality,
+          g_t2_mortality,
+
+          g_t0_marker,
+          g_t1_marker,
+          g_t2_marker,
+          ncol = 3, nrow = 2,
+          heights = c(1, 0.9))
+
+g
+
+
+
+# Save --------------------------------------------------------------------
+ggsave(plot = g,
+       filename = "Grant/joint_traj_at_landmark_times_no_mean.pdf",
+       height = 13,
+       width = 18,
        unit = "cm")
 
 ggsave(filename = "Grant/mean_traj.pdf",
        plot = g_mean,
-       height = 8,
+       height = 7,
        width = 10, unit = "cm")
 
 ggarrange(g_time,
