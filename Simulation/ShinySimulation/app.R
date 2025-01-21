@@ -5,6 +5,7 @@
 library(shiny)
 library(tidyverse)
 
+
 # UI ----------------------------------------------------------------------
 ui <- fluidPage(
   titlePanel("Simulation: Longitudinal Marker and Mortality"),
@@ -24,19 +25,38 @@ ui <- fluidPage(
       textInput("lambda_t", "Logit baseline mortality probability (Lambda.t):",
                 value = paste(rep(logit(0.025), 14), collapse = ",")),
       numericInput("theta_t", "Global marker effect on mortality probability (Theta.t):",
-                   value = 0.05),
+                   value = -2),
       textInput("varphi_t", "Local marker effect on mortality probability (Varphi.t):",
-                value = paste(c(0.15, 0.15, 0.1, 0.1, 0.15, 0.2, 0.4, 1.1, 0.4, 0.2, 0.5, 0.2, 0.1, 0.1),
+                value = paste(c(-0.5, -0.3, -0.4, -0.6, -0.8, -0.8, -1.3, -1.1, -0.8, -0.6, -0.5, -0.2, -0.1, -0.1),
                               collapse = ",")),
       textInput("xi_t", "Time-independent covariate effect on mortality probability (Xi.t):",
                 value = paste(c(0, 0, 0), collapse = ",")),
 
       h3("Longitudinal Marker Parameters"),
+      numericInput("long_threshold", "Threshold for marker change (Long.threshold):",
+                   value = 1),
       textInput("zeta_long", "Baseline marker trend (Zeta.long):",
-                value = paste(sort(c(runif(n = 15, min = 2, max = 2.5)), decreasing = F), collapse = ",")),
-      textInput("eta_long", "Local autoregressive component (Eta.long):",
-                value = paste(sort(runif(n = 14, min = 0.7, max = 1.8), decreasing = T),
+                value = paste(c(sort(rep(2, 5), decreasing = T),
+                                sort(c(runif(n = 10, min = -3, max = 1)),
+                                     decreasing = T)
+                                ),
                               collapse = ",")),
+      textInput("zeta_ReLU_long", "Threshold trend effect (Zeta.ReLU.long):",
+                value = paste(c(rep(-0.3, 5), rep(-0.7, 10)),
+                              collapse = ",")),
+
+      textInput("eta_long", "Local autoregressive component (Eta.long):",
+                value = paste(
+                  # sort(
+                  runif(n = 14, min = -1.4, max = -0.7),
+                  # decreasing = F),
+                  collapse = ",")),
+      numericInput("slope_threshold", "Threshold for slope effect (Slope.threshold):",
+                   value = -0.5),
+      textInput("eta_slope_long", "Local autoregressive slope effect (Eta.slope.long):",
+                value = paste(rep(-0.5, 14),
+                              collapse = ",")),
+
       textInput("beta_long", "Time-independent covariate effect on marker (Beta.long):",
                 value = paste(c(0, 0, 0), collapse = ",")),
       textInput("sd_long_trajectory", "Standard deviation for longitudinal marker (sigma.t):",
@@ -106,6 +126,16 @@ ui <- fluidPage(
 
         h3("Difference in Mortal and Immortal Trajectory"),
         plotOutput("diff_marker")
+      ),
+
+      # Tab for calibration metrics (sanity check of my simulation)
+      tabPanel(
+        title = "Calibration",
+        h3("Calibration plot"),
+        plotOutput("calibration"),
+
+        h3("D-calibration"),
+        tableOutput("calibration_II")
       )
 
 
@@ -128,8 +158,13 @@ server <- function(input, output, session) {
     theta_t <- as.numeric(input$theta_t)
     varphi_t <- as.numeric(unlist(strsplit(input$varphi_t, ",")))
     xi_t <- as.numeric(unlist(strsplit(input$xi_t, ",")))
+
+    long_threshold <- as.numeric(input$long_threshold)
     zeta_long <- as.numeric(unlist(strsplit(input$zeta_long, ",")))
+    zeta_ReLU_long <- as.numeric(unlist(strsplit(input$zeta_ReLU_long, ",")))
     eta_long <- as.numeric(unlist(strsplit(input$eta_long, ",")))
+    slope_threshold <- as.numeric(input$slope_threshold)
+    eta_slope_long <- as.numeric(unlist(strsplit(input$eta_slope_long, ",")))
     beta_long <- as.numeric(unlist(strsplit(input$beta_long, ",")))
     sd_long_trajectory <- as.numeric(input$sd_long_trajectory)
 
@@ -143,8 +178,12 @@ server <- function(input, output, session) {
       theta.t = theta_t,
       varphi.t = varphi_t,
       xi.t = xi_t,
+      long.threshold = long_threshold,
       zeta.long = zeta_long,
+      zeta.ReLU.long = zeta_ReLU_long,
       eta.long = eta_long,
+      slope.threshold = slope_threshold,
+      eta.slope.long = eta_slope_long,
       beta.long = beta_long,
       sd.long.trajectory = sd_long_trajectory
     )
@@ -152,7 +191,12 @@ server <- function(input, output, session) {
     list(
       parameters = data.frame(
         Parameter = c("Sample Size (n)", "Times", "Lambda.t", "Theta.t",
-                      "Varphi.t", "Xi.t", "Zeta.long", "Eta.long", "Beta.long"),
+                      "Varphi.t", "Xi.t",
+
+                      "Long. Threshold",
+                      "Zeta.long", "Zeta.ReLU.long",
+                      "Eta.long", "Slope Threshold", "Eta.slope.long",
+                      "Beta.long"),
         Value = c(
           input$n,
           paste(times, collapse = ", "),
@@ -160,8 +204,13 @@ server <- function(input, output, session) {
           theta_t,
           paste(varphi_t, collapse = ", "),
           paste(xi_t, collapse = ", "),
+
+          long_threshold,
           paste(zeta_long, collapse = ", "),
+          paste(zeta_ReLU_long, collapse = ", "),
           paste(eta_long, collapse = ", "),
+          slope_threshold,
+          paste(eta_slope_long, collapse = ", "),
           paste(beta_long, collapse = ", ")
         )
       ),
@@ -205,6 +254,18 @@ server <- function(input, output, session) {
   output$at_risk <- renderPlot({
     req(simulation_results())
     plot_patients_at_risk(simulation_results()$sim_data)
+  })
+
+  output$calibration <- renderPlot({
+    req(simulation_results())
+    plot_calibration(simulation_results()$sim_data)
+  })
+
+  output$calibration_II <- renderTable({
+    req(simulation_results())
+    D_res <- estimate_d_calibration(simulation_results()$sim_data)
+
+    D_res$contingency_table
   })
 
   output$immortal_mortal_marker <- renderPlot({

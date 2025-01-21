@@ -37,7 +37,13 @@ plot_longitudinal_trend <- function(times, zeta.long) {
 
 # Heterogeneity for a chosen subset of patients over time
 plot_heterogeneity <- function(data,
-                               sample_IDs = seq(1, 10)) {
+                               sample_IDs = NULL) {
+
+  if (is.null(sample_IDs)) {
+    sample_IDs <- sample(x = seq(1, length(unique(data$ID))),
+                         size = 10)
+  }
+
   ID_rank_t0 <- data %>%
     dplyr::filter(Time == 0) %>%
     pull(Marker) %>%
@@ -75,8 +81,11 @@ plot_heterogeneity <- function(data,
 
 # Patient-specific mortality probabilities over time; conditional on partition-specific survival
 plot_mortality_prob <- function(data,
-                                sample_IDs = seq(1, 10)) {
-
+                                sample_IDs = NULL) {
+  if (is.null(sample_IDs)) {
+    sample_IDs <- sample(x = seq(1, length(unique(data$ID))),
+                         size = 10)
+  }
 
   ggplot(data = data %>% filter(ID %in% sample_IDs),
          aes(x = Time,
@@ -103,9 +112,12 @@ plot_mortality_prob <- function(data,
 
 # Cumulative patient-specific mortality probability
 plot_cum_mortality_prob <- function(data,
-                                    sample_IDs = seq(1, 10)) {
+                                    sample_IDs = NULL) {
 
-
+  if (is.null(sample_IDs)) {
+    sample_IDs <- sample(x = seq(1, length(unique(data$ID))),
+                         size = 10)
+  }
 
   data_cum <- data %>%
     filter(ID %in% sample_IDs) %>%
@@ -124,6 +136,7 @@ plot_cum_mortality_prob <- function(data,
              color = ID %>% as.factor())) +
     geom_point() +
     geom_line() +
+    # might through warning message when no death happened, but that is okay
     geom_point(data = data_cum %>%
                  group_by(ID) %>%
                  filter(ID %in% sample_IDs & Death == 1) %>%
@@ -223,6 +236,95 @@ plot_diff_moral_immortal <- function(sim_data) {
          color = "",
          x = "Time") %>%
     return()
+}
+
+plot_calibration <- function(data) {
+
+  data_cum <- data %>%
+    group_by(ID) %>%
+    dplyr::mutate(lag_Mort_Prob = c(0, na.omit(dplyr::lag(Mort_Prob))),
+           Surv_Prob = 1 - lag_Mort_Prob,
+           cum_Surv = cumprod(Surv_Prob),
+           marg_Mort_Prob = cum_Surv * Mort_Prob,
+           cum_Mort_Prob = cumsum(marg_Mort_Prob)) %>%
+    filter(Time == ceiling(Mort_Time))
+
+  ggplot(data = data_cum,
+         aes(x = cum_Surv,
+             y = Death)) +
+    # geom_point(alpha = 0.1) +
+    geom_abline(aes(intercept = 0, slope = 1)) +
+    geom_point() +
+    theme_bw() +
+    labs(x = "Cumulative survival probability",
+         y = "Death indicator") +
+    theme(legend.position = "bottom")
+}
+
+estimate_d_calibration <- function(data, B = 10) {
+
+  data.id <- data %>%
+    group_by(ID) %>%
+    arrange(Time) %>%
+    dplyr::mutate(lag_Mort_Prob = c(0, na.omit(lag(Mort_Prob))),
+           Surv = 1 - lag_Mort_Prob,
+           cum_Surv = cumprod(Surv)) %>%
+    filter(Time == ceiling(Mort_Time))
+
+  quantiles <- 1 - seq(0,1,length.out = B + 1)
+  int_B <- seq(0, 1, length.out = B + 1)
+
+  binIndex <- seq_along(quantiles)[-1]
+
+  uncensoredProbabilities <- data.id %>%
+    # only uncensored patients
+    filter(Death == 1) %>%
+    pull(cum_Surv)
+
+  uncensoredBinning <- array(0, B)
+  for (b in seq(1, B)) {
+
+    uncensoredBinning[B - b + 1] <- (((data.id$cum_Surv) >= int_B[b]) & ((data.id$cum_Surv) < int_B[b + 1])) %>%
+      sum()
+  }
+
+  censoredProbabilities <- data.id %>%
+    # only censored patients
+    filter(Death == 0) %>%
+    pull(cum_Surv)
+
+  if(length(censoredProbabilities) > 0){
+    censoredBinPositions <- prodlim::sindex(quantiles, censoredProbabilities,
+                                  comp = "greater", strict = T)
+    #Sometimes the probability will be 1 in which case we just want to put them in the first bin.
+    censoredBinPositions <- ifelse(censoredBinPositions == 0, 1,
+                                  censoredBinPositions)
+    quantileWidth <- 1 / B
+    firstBin <- ifelse(censoredBinPositions == B, 1,
+                      (censoredProbabilities - quantiles[censoredBinPositions + 1]) / censoredProbabilities)
+    restOfBins <- ifelse(censoredProbabilities == 0, 1, 1 / (B * censoredProbabilities))
+
+    listOfContributions <- lapply(seq_along(censoredBinPositions),
+                                  function(x) c(rep(0, censoredBinPositions[x] - 1),
+                                                rep(firstBin[x],1),
+                                                rep(restOfBins[x], B - censoredBinPositions[x])))
+    censoredBinning <- colSums(plyr::ldply(listOfContributions, rbind))
+  } else censoredBinning <- 0
+
+  combinedBins <- uncensoredBinning + censoredBinning
+  names(combinedBins) <- quantiles[-length(quantiles)]
+
+  # p-value for chi squared test
+  pvalue <- chisq.test(combinedBins)$p.value
+
+  combinedBins_df <- data.frame(N = combinedBins) %>%
+    mutate(Prop = (N / sum(N)) %>% round(digits = 4)) %>%
+    t() %>%
+    as.data.frame() %>%
+    mutate(p = pvalue)
+
+  return(list(contingency_table = combinedBins_df,
+              p = pvalue))
 }
 
 

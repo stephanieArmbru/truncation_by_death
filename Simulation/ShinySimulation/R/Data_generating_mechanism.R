@@ -62,17 +62,38 @@ SimulateJointLongData <- function(n.sample = 100,
 
                                   # partition-specific probability of death
                                   lambda.t,
+
+                                  # slope threshold for additional marker effect
+                                  slope.t.threshold,
+                                  # marker threshold of additional marker effect
+                                  long.t.threshold,
+
                                   # global dependence
                                   theta.t,
                                   # partition-specific dependence
                                   varphi.t,
+                                  # partition-specific effect for marker slope
+                                  varphi.slope.t,
+                                  # partition-specific effect for marker distance to threshold
+                                  varphi.ReLU.t,
                                   # time-independent effect of baseline covariates
                                   xi.t,
 
+                                  # threshold for longitudinal marker
+                                  long.threshold,
+
                                   # partition-specific mean
                                   zeta.long,
+                                  # add-on for threshold
+                                  zeta.ReLU.long,
+
                                   # partition-specific effect of autoregressive term
                                   eta.long,
+                                  # slope threshold
+                                  slope.threshold,
+                                  # partition-specific effect of autoregressive slope,
+                                  eta.slope.long,
+
                                   # time-independent effect of baseline covariates
                                   beta.long,
 
@@ -103,9 +124,19 @@ SimulateJointLongData <- function(n.sample = 100,
   if (length(theta.t) != 1) {stop("theta.t should have dimension 1")}
   if(length(xi.t) != p) {stop("xi.t should have the same length as the number of covariates")}
 
+
+  # check thresholds
+  if (length(long.threshold) != 1) {stop("long.threshold should have dimension 1")}
+  if (length(long.t.threshold) != 1) {stop("long.t.threshold should have dimension 1")}
+  if (length(slope.t.threshold) != 1) {stop("slope.t.threshold should have dimension 1")}
+
+
   # check input dimensions for parameters for longitudinal marker
   if (length(zeta.long) != length(times_incl_zero)) {stop("zeta.long should have the same length as times")}
+  if (length(zeta.ReLU.long) != length(times_incl_zero)) {stop("zeta.ReLU.long should have the same length as times")}
+
   if (length(eta.long) != length(times)) {stop("eta.long should have length of times - 1")}
+  if (length(eta.slope.long) != length(times)) {stop("eta.slope.long should have length of times - 1")}
   if (length(beta.long) != p) {stop("beta.long should have the same length as number of covariates")}
 
 
@@ -157,30 +188,60 @@ SimulateJointLongData <- function(n.sample = 100,
                   dim = c(n.sample,
                           length(times_incl_zero)))
 
+  # time to terminal event
+  Time.T <- array(max(times_incl_zero), dim = n.sample)
+
   # run through all partitions (+1 indexing due to zero time point)
-  for(k in seq(2, K+1)) {
+  for(k in seq(2, K + 1)) {
 
     # who is at risk? (alive)
     at.risk.T <- N.T[, k - 1] == 0
 
-    # standardize marker
-    Y.traj.stand.k_1 <- (Y.traj[, k - 1] - mean(Y.traj[, k - 1])) / sqrt(var(Y.traj[, k - 1]))
+    # compute mean for longitudinal trajectory
+    ## depends on prior slope
+    prior.slope <- array(0, dim = c(n.sample, 1))
+    if (k > 2) {
+      prior.slope[Y.traj[, k - 1] - Y.traj[, k - 2] <= slope.threshold, 1] <- 1
+    }
 
+    ## ReLU function: additional intercept if prior Y value lies below certain threshold
+    ReLU <- array(0, dim = c(n.sample, 1))
+    ReLU[Y.traj[, k - 1] <= long.threshold, 1] <- 1
+
+    ## intercept term
+    mu_k_intercept <- zeta.long[k] + zeta.ReLU.long[k] * ReLU
+
+
+    ## autoregressive term
+    mu_k_autoregressive <- eta.long[k - 1] * (Y.traj[, k - 1] - X %*% beta.long - zeta.long[k - 1]) + eta.slope.long[k - 1] * prior.slope
+
+    # piece it all together
+    mu_k <- mu_k_intercept + X %*% beta.long + mu_k_autoregressive
 
     # longitudinal trajectory
     Y.traj[, k] <- as.matrix(rnorm(n = n.sample,
-                                   mean = zeta.long[k] + X %*% beta.long +
-                                     eta.long[k - 1] * (Y.traj[, k - 1] - X %*% beta.long - zeta.long[k - 1]),
+                                   mean = mu_k,
                                    sd = sd.long.trajectory))
 
-    # standardize marker ("turned off" right now)
-    Y.traj.stand.k <-  Y.traj[, k]
-      # (Y.traj[, k] - mean(Y.traj[, k])) / sqrt(var(Y.traj[, k]))
+    # death probability (different indexing since no one can die at time zero)
+    ## depends on current slope in marker trajectory
+    present.slope <- array(0, dim = c(n.sample, 1))
+    present.slope[Y.traj[, k] - Y.traj[, k - 1] <= slope.t.threshold, 1] <- 1
 
-    # death probability
-    probs.T <- force.mortality * expit(lambda.t[k - 1] +
-                                         (theta.t + varphi.t[k - 1]) * Y.traj.stand.k +
-                                         X %*% xi.t)
+    ## ReLU function: additive slope if marker value below a certain threshold
+    ReLU.t <- array(0, dim = c(n.sample, 1))
+    ReLU.t[Y.traj[, k] <= long.t.threshold, 1] <- 1
+
+    ## intercept term
+    baseline_k <- lambda.t[k - 1]
+
+    ## marker term
+    marker_k <- (theta.t +
+                   varphi.t[k - 1]) * sign(max(zeta.long) - Y.traj[, k]) * (max(zeta.long) - Y.traj[, k])^2 +
+      ReLU.t * (long.t.threshold - Y.traj[, k])^2 * varphi.ReLU.t[k - 1] +
+      present.slope * varphi.slope.t[k - 1]
+
+    probs.T <- expit( baseline_k + marker_k + X %*% xi.t )
 
     # save patient-specific probability
     Prob.T[, k] <- probs.T
@@ -189,6 +250,16 @@ SimulateJointLongData <- function(n.sample = 100,
     if (sum(at.risk.T) > 0) {
       # draw binomial random variable for those still at risk (alive)
       N.T[at.risk.T, k] <- rbinom(sum(at.risk.T), 1, probs.T)
+
+      # which patient experienced the terminal event in the current partition
+      happened.T <- N.T[at.risk.T, k] == 1
+
+      if (sum(happened.T) > 0) {
+        # impute time of death within interval
+        Time.T[at.risk.T][happened.T] <- runif(sum(happened.T),
+                                               min = times_incl_zero[k - 1],
+                                               max = times_incl_zero[k])
+      }
     }
 
     # maintain 1 if ever one
@@ -197,6 +268,7 @@ SimulateJointLongData <- function(n.sample = 100,
     }
   }
 
+
   # add uninformative censoring (always observed at baseline)
   C <- sample(x = seq(2, K), replace = T, size = n.sample)
   somecens <- rbinom(n.sample, 1, cens.poten.rate)
@@ -204,6 +276,7 @@ SimulateJointLongData <- function(n.sample = 100,
 
   for (i in seq(1, n.sample)) {
     if (somecens[i]==1) {
+      Time.T[i] <- min(C[i], Time.T[i])
       N.T[i, C[i]:K] <- NA
       Y.traj[i, C[i]:K] <- NA
       # generate censoring indicator (no death before)
@@ -235,6 +308,9 @@ SimulateJointLongData <- function(n.sample = 100,
            value = "Mort_Prob") %>%
     mutate(ID = rep(seq(1, n.sample), length(times_incl_zero)))
 
+  Time.T.df <- data.frame(ID = seq(1, n.sample),
+                          Mort_Time = Time.T)
+
 
   X_df <- X %>%
     as.data.frame()
@@ -242,13 +318,16 @@ SimulateJointLongData <- function(n.sample = 100,
   X_df$ID <- seq(1, n.sample)
 
   # merge all components
-  df.return.prelim.prelim <- inner_join(Y.traj.df.long,
+  df.return.prelim <- inner_join(Y.traj.df.long,
                                  N.T.df.long,
                                  by = c("ID", "Time"))
-  df.return.prelim <- inner_join(df.return.prelim.prelim,
+  df.return.prelim <- inner_join(df.return.prelim,
                                  Prob.T.df.long,
                                  by = c("ID", "Time"))
 
+  df.return.prelim <- inner_join(df.return.prelim,
+                                 Time.T.df,
+                                 by = "ID")
   df.return <- inner_join(df.return.prelim,
                           X_df,
                           by = "ID") %>%

@@ -14,7 +14,7 @@
 
 
 library("devtools")
-install_github("harrisonreeder/SemiCompRisksFreq")
+# install_github("harrisonreeder/SemiCompRisksFreq")
 
 # Libraries ---------------------------------------------------------------
 library(haven)
@@ -602,7 +602,7 @@ act_visit_av_surv <- act_visit %>%
   group_by(age_new) %>%
   summarize(casi_score_av = mean(na.omit(casi_score))) %>%
   ungroup() %>%
-  mutate(type = "survivors")
+  mutate(type = "No dementia")
 
 ggplot(data = act_visit_av_surv,
        aes(x = age_new,
