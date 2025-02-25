@@ -154,17 +154,17 @@ SimulateJointLongData <- function(n.sample = 100,
   K <- length(times)
 
   # baseline covariates: continuous Gaussian and discrete Binomial (coin toss)
-  X_cont <- replicate(floor(p / 2),
+  X.cont <- replicate(floor(p / 2),
                       {rnorm(n.sample, mean = 0, sd = 1)},
                       simplify = "array")
 
-  X_bin <- replicate(ceiling(p / 2),
+  X.bin <- replicate(ceiling(p / 2),
                      {rbinom(n = n.sample, size = 1, prob = 0.5)},
                      simplify = "array")
 
   # format design matrix
-  X <- matrix(cbind(X_cont,
-                    X_bin),
+  X <- matrix(cbind(X.cont,
+                    X.bin),
               nrow = n.sample, ncol = p,
               byrow = FALSE)
 
@@ -172,16 +172,24 @@ SimulateJointLongData <- function(n.sample = 100,
   Y.traj <- array(dim = c(n.sample,
                           length(times_incl_zero)))
 
-  # baseline longitudinal marker
+  # baseline longitudinal marker Y_0
   Y.traj[, 1] <- as.matrix(rnorm(n = n.sample,
                                  mean = zeta.long[1] + X %*% beta.long,
                                  sd = sd.long.trajectory))
 
-  # risk indicator array over time
+
+
+  # death indicator array over time
   # baseline: all patients are at risk (I = 0)
   N.T <- array(0,
                dim = c(n.sample,
                       length(times_incl_zero)))
+  # # risk indicator over time
+  # at.risk.T <- array(0,
+  #                    dim = c(n.sample,
+  #                            length(times_incl_zero)))
+  # # baseline: all patients are at risk (I = 0)
+  # at.risk.T[, 1] <- 1
 
   # mortality probability array over time
   Prob.T <- array(0,
@@ -197,8 +205,73 @@ SimulateJointLongData <- function(n.sample = 100,
     # who is at risk? (alive)
     at.risk.T <- N.T[, k - 1] == 0
 
+
+    # death probability
+    present.slope <- array(0, dim = c(n.sample, 1))
+    if (k > 2) {
+      present.slope[Y.traj[, k - 1] - Y.traj[, k - 2] <= slope.t.threshold, 1] <- 1
+    }
+
+    ## ReLU function: additive slope if marker value below a certain threshold
+    ReLU.t <- array(0, dim = c(n.sample, 1))
+    ReLU.t[Y.traj[, k - 1] <= long.t.threshold, 1] <- 1
+
+
+    ## terminal event probability
+    ## VERSION 1:
+    # marker.k <- (theta.t +
+    #                varphi.t[k - 1]) * sign(Y.traj[, k - 1] - max(zeta.long)) * (max(zeta.long) - Y.traj[, k - 1]) +
+    #   ReLU.t * (long.t.threshold - Y.traj[, k - 1]) * varphi.ReLU.t[k - 1] +
+    #   present.slope * varphi.slope.t[k - 1]
+
+
+    # if (k > 2) {
+    #   marker.k <- (theta.t +
+    #                  varphi.t[k - 1]) * sign(Y.traj[, k - 1] - Y.traj[, 1]) * (Y.traj[, 1] - Y.traj[, k - 1]) +
+    #     ReLU.t * (long.t.threshold - Y.traj[, k - 1]) * varphi.ReLU.t[k - 1] +
+    #     present.slope * varphi.slope.t[k - 1]
+    # } else {
+    #   marker.k <- Y.traj[, k] - sum(Y.traj[, k])
+    # }
+
+    ## VERSION 2:
+    marker.k <- - ((theta.t +
+                   varphi.t[k - 1]) * (Y.traj[, k-1])) +
+      ReLU.t * (long.t.threshold - Y.traj[, k - 1]) * varphi.ReLU.t[k - 1] +
+      present.slope * varphi.slope.t[k - 1]
+
+
+    # linear predictor
+    lin.pred.k <- lambda.t[k - 1] + marker.k + X %*% xi.t
+
+    # avoid NA in probability
+    probs.T <- expit( lin.pred.k )
+    probs.T[lin.pred.k >= 5] <- 1
+    probs.T[lin.pred.k <= -5] <- 0
+
+    # save patient-specific probability for those at risk only
+    # dead patients have probability zero to die again
+    Prob.T[at.risk.T, k] <- probs.T[at.risk.T]
+
+    # if people still at risk
+    if (!is.na(sum(at.risk.T)) & sum(at.risk.T) > 0) {
+      # draw binomial random variable for those still at risk (alive)
+      N.T[at.risk.T, k] <- rbinom(sum(at.risk.T), 1, Prob.T[at.risk.T, k])
+
+      # which patient experienced the terminal event in the current partition
+      happened.T <- N.T[at.risk.T, k] == 1
+
+      if (!is.na(sum(happened.T)) & (sum(happened.T) > 0)) {
+        # impute time of death within interval
+        Time.T[at.risk.T][happened.T] <- runif(sum(happened.T),
+                                               min = times_incl_zero[k - 1],
+                                               max = times_incl_zero[k])
+      }
+    }
+
     # compute mean for longitudinal trajectory
-    ## depends on prior slope
+    ## VERSION 1:
+    # depends on prior slope
     prior.slope <- array(0, dim = c(n.sample, 1))
     if (k > 2) {
       prior.slope[Y.traj[, k - 1] - Y.traj[, k - 2] <= slope.threshold, 1] <- 1
@@ -209,58 +282,21 @@ SimulateJointLongData <- function(n.sample = 100,
     ReLU[Y.traj[, k - 1] <= long.threshold, 1] <- 1
 
     ## intercept term
-    mu_k_intercept <- zeta.long[k] + zeta.ReLU.long[k] * ReLU
+    mu.k.intercept <- zeta.long[k] + zeta.ReLU.long[k] * ReLU
 
 
     ## autoregressive term
-    mu_k_autoregressive <- eta.long[k - 1] * (Y.traj[, k - 1] - X %*% beta.long - zeta.long[k - 1]) + eta.slope.long[k - 1] * prior.slope
+    mu.k.autoregressive <- eta.long[k - 1] * (Y.traj[, k - 1] -
+                                                X %*% beta.long - zeta.long[k - 1]) +
+      eta.slope.long[k - 1] * prior.slope
 
     # piece it all together
-    mu_k <- mu_k_intercept + X %*% beta.long + mu_k_autoregressive
+    mu.k <- mu.k.intercept + X %*% beta.long + mu.k.autoregressive
 
-    # longitudinal trajectory
+    # sample longitudinal trajectory
     Y.traj[, k] <- as.matrix(rnorm(n = n.sample,
-                                   mean = mu_k,
+                                   mean = mu.k,
                                    sd = sd.long.trajectory))
-
-    # death probability (different indexing since no one can die at time zero)
-    ## depends on current slope in marker trajectory
-    present.slope <- array(0, dim = c(n.sample, 1))
-    present.slope[Y.traj[, k] - Y.traj[, k - 1] <= slope.t.threshold, 1] <- 1
-
-    ## ReLU function: additive slope if marker value below a certain threshold
-    ReLU.t <- array(0, dim = c(n.sample, 1))
-    ReLU.t[Y.traj[, k] <= long.t.threshold, 1] <- 1
-
-    ## intercept term
-    baseline_k <- lambda.t[k - 1]
-
-    ## marker term
-    marker_k <- (theta.t +
-                   varphi.t[k - 1]) * sign(max(zeta.long) - Y.traj[, k]) * (max(zeta.long) - Y.traj[, k])^2 +
-      ReLU.t * (long.t.threshold - Y.traj[, k])^2 * varphi.ReLU.t[k - 1] +
-      present.slope * varphi.slope.t[k - 1]
-
-    probs.T <- expit( baseline_k + marker_k + X %*% xi.t )
-
-    # save patient-specific probability
-    Prob.T[, k] <- probs.T
-
-    # if people still at risk
-    if (sum(at.risk.T) > 0) {
-      # draw binomial random variable for those still at risk (alive)
-      N.T[at.risk.T, k] <- rbinom(sum(at.risk.T), 1, probs.T)
-
-      # which patient experienced the terminal event in the current partition
-      happened.T <- N.T[at.risk.T, k] == 1
-
-      if (sum(happened.T) > 0) {
-        # impute time of death within interval
-        Time.T[at.risk.T][happened.T] <- runif(sum(happened.T),
-                                               min = times_incl_zero[k - 1],
-                                               max = times_incl_zero[k])
-      }
-    }
 
     # maintain 1 if ever one
     if (k < K + 1)  {
@@ -270,54 +306,56 @@ SimulateJointLongData <- function(n.sample = 100,
 
 
   # add uninformative censoring (always observed at baseline)
-  C <- sample(x = seq(2, K), replace = T, size = n.sample)
-  somecens <- rbinom(n.sample, 1, cens.poten.rate)
-  cens <- rep(0, n.sample)
-
-  for (i in seq(1, n.sample)) {
-    if (somecens[i]==1) {
-      Time.T[i] <- min(C[i], Time.T[i])
-      N.T[i, C[i]:K] <- NA
-      Y.traj[i, C[i]:K] <- NA
-      # generate censoring indicator (no death before)
-      if (N.T[i, C[i] - 1] == 0) {cens[i] = 1}
-    }
-  }
+  # C <- sample(x = seq(2, K), replace = T, size = n.sample)
+  # somecens <- rbinom(n.sample, 1, cens.poten.rate)
+  # cens <- rep(0, n.sample)
+  #
+  # for (i in seq(1, n.sample)) {
+  #   if (somecens[i]==1) {
+  #     Time.T[i] <- min(C[i], Time.T[i])
+  #     N.T[i, C[i]:K] <- NA
+  #     Y.traj[i, C[i]:K] <- NA
+  #     # generate censoring indicator (no death before)
+  #     if (N.T[i, C[i] - 1] == 0) {cens[i] = 1}
+  #   }
+  # }
 
   # transform to data frame
-  Y.traj.df <- Y.traj %>% as.data.frame()
-  colnames(Y.traj.df) <- times_incl_zero
-  N.T.df <- N.T %>% as.data.frame()
-  colnames(N.T.df) <- times_incl_zero
-  Prob.T.df <- Prob.T %>% as.data.frame()
-  colnames(Prob.T.df) <- times_incl_zero
+  Y.traj.df <- Y.traj %>%
+    as.data.frame() %>%
+    mutate(ID = seq(1, n.sample))
+  colnames(Y.traj.df) <- c(times_incl_zero, "ID")
+  N.T.df <- N.T %>%
+    as.data.frame() %>%
+    mutate(ID = seq(1, n.sample))
+  colnames(N.T.df) <- c(times_incl_zero, "ID")
+  Prob.T.df <- Prob.T %>%
+    as.data.frame() %>%
+    mutate(ID = seq(1, n.sample))
+  colnames(Prob.T.df) <- c(times_incl_zero, "ID")
 
   # transform to long format
   Y.traj.df.long <- Y.traj.df %>%
     gather(key = "Time",
-           value = "Marker") %>%
-    mutate(ID = rep(seq(1, n.sample), length(times_incl_zero)))
+           value = "Marker", -ID)
 
   N.T.df.long <- N.T.df %>%
     gather(key = "Time",
-           value = "Death") %>%
-    mutate(ID = rep(seq(1, n.sample), length(times_incl_zero)))
+           value = "Death", -ID)
 
   Prob.T.df.long <- Prob.T.df %>%
     gather(key = "Time",
-           value = "Mort_Prob") %>%
-    mutate(ID = rep(seq(1, n.sample), length(times_incl_zero)))
+           value = "Mort_Prob", -ID)
 
   Time.T.df <- data.frame(ID = seq(1, n.sample),
                           Mort_Time = Time.T)
-
 
   X_df <- X %>%
     as.data.frame()
   colnames(X_df) <- paste0("X", seq(1, p))
   X_df$ID <- seq(1, n.sample)
 
-  # merge all components
+  # for immortal cohort
   df.return.prelim <- inner_join(Y.traj.df.long,
                                  N.T.df.long,
                                  by = c("ID", "Time"))
@@ -328,13 +366,38 @@ SimulateJointLongData <- function(n.sample = 100,
   df.return.prelim <- inner_join(df.return.prelim,
                                  Time.T.df,
                                  by = "ID")
-  df.return <- inner_join(df.return.prelim,
-                          X_df,
-                          by = "ID") %>%
-    mutate(Time = as.numeric(Time))
+  df.return.IM <- inner_join(df.return.prelim,
+                             X_df,
+                             by = "ID") %>%
+    mutate(Time = as.numeric(Time)) %>%
+    group_by(ID) %>%
+    mutate(TM = rank(Time)) %>%
+    ungroup() %>%
+    arrange(Time, ID)
 
-  return(list(df.return = df.return,
-              cens = cens)
+
+  # for mortal cohort
+  df.return.M <- df.return.IM %>%
+    group_by(ID) %>%
+    arrange(Time) %>%
+    mutate(obs_post_death = cumsum(Death)) %>%
+    filter(obs_post_death <= 1) %>%
+    ungroup() %>%
+    arrange(Time, ID)
+
+
+
+
+
+  return(list(df.return.IM = df.return.IM,
+              df.return.M = df.return.M,
+
+              # formatting for estimation method
+              X = X_df
+
+              # censoring
+              # cens = cens
+              )
   )
 }
 
